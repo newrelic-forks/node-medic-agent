@@ -1,0 +1,92 @@
+@startuml npd-block
+' NPD high-level block diagram — operator view
+' Render: plantuml npd-block.puml -> npd-block.png
+' smetana is PlantUML's built-in layout engine — no external graphviz/dot needed.
+!pragma layout smetana
+
+skinparam componentStyle rectangle
+skinparam linetype ortho
+skinparam shadowing false
+skinparam rectangleBackgroundColor #FAFAFA
+skinparam rectangleBorderColor #555555
+
+title Node Problem Detector — Block Diagram (per-node)
+
+rectangle "Worker Node (Linux)" as node {
+  rectangle "Host kernel + systemd" as host {
+    file "/dev/kmsg"            as kmsg
+    file "journald"             as journald
+    file "/var/log/*"           as filelogs
+    file "/proc, /sys"          as procfs
+    file "kubelet :10248/healthz" as kubelet_hc
+    file "containerd CRI socket"  as cri
+  }
+
+  rectangle "node-problem-detector (DaemonSet pod, privileged)" as npd {
+
+    rectangle "Problem Daemons (goroutines in single binary)" as daemons {
+      component "SystemLogMonitor\n(kmsg / journald / filelog watcher)" as slm
+      component "SystemStatsMonitor\n(CPU / mem / disk / net / OS feature)" as ssm
+      component "CustomPluginMonitor\n(exec plugin, exit-code contract)" as cpm
+      component "HealthChecker\n(custom-plugin variant for kubelet/docker/containerd)" as hc
+    }
+
+    rectangle "ProblemDetector\n(pkg/problemdetector)" as core
+    rectangle "Exporters" as exp {
+      component "Kubernetes exporter\n(NodeCondition patch + Event create)" as k8sexp
+      component "Prometheus exporter\n(/metrics on :20257)" as promexp
+      component "Stackdriver exporter\n(GCP only — disabled by build tag)" as gcpexp
+    }
+
+    file "/conditions HTTP\n(:20256, JSON)" as cond_http
+    file "ConfigMap\n/config/*.json" as cfg
+  }
+}
+
+cloud "Kubernetes apiserver" as api {
+  database "Node.status.conditions[]" as nodecond
+  database "Event objects (kube-system / event-namespace)" as events
+}
+
+cloud "Prometheus / Grafana / NR Infra agent\n(scrape :20257)" as scraper
+
+' ----------------- data flow -----------------
+host  --> daemons      : tail / read
+cfg   --> daemons      : rules, plugin paths
+slm   --> core         : *types.Status (Events + Conditions)
+cpm   --> core         : *types.Status (Events + Conditions)
+hc    --> core         : *types.Status (via cpm)
+ssm   --> promexp      : OpenCensus views (no Conditions)
+core  --> k8sexp       : ExportProblems(*Status)
+core  --> promexp      : ExportProblems(*Status)
+core  --> gcpexp       : ExportProblems(*Status)
+
+k8sexp --> nodecond    : PATCH /api/v1/nodes/{name}/status\n(JSON merge patch)
+k8sexp --> events      : POST events (Source.Component=monitor.source)
+k8sexp --> cond_http   : serves current conditions (debug)
+promexp --> scraper    : GET /metrics
+
+note right of core
+  Single channel (groupChannel) fan-in
+  from all monitors → fan-out to all exporters.
+  pkg/problemdetector/problem_detector.go:48-89
+end note
+
+note right of cpm
+  Plugin contract:
+  exit 0 → OK   (Condition False)
+  exit 1 → NonOK(Condition True, Warning Event)
+  exit 2 → Unknown
+  pkg/custompluginmonitor/types/types.go:27-31
+  Stdout truncated to max_output_length (default 80B)
+end note
+
+note right of slm
+  Pluggable input: kmsg | filelog | journald
+  Rule has type=temporary|permanent + regex
+  Permanent rules carry "condition" field;
+  matching emits Condition update.
+  pkg/systemlogmonitor/types/types.go:32-50
+end note
+
+@enduml

@@ -1,0 +1,90 @@
+@startuml nodemedic-arch
+' NodeMedic — system architecture (cloud-agnostic: EKS + Azure kubeadm)
+' smetana is PlantUML's built-in layout engine — no external graphviz/dot needed.
+!pragma layout smetana
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam rectangleBackgroundColor #FAFAFA
+skinparam packageBackgroundColor  #F5F8FF
+skinparam packageBorderColor      #6B8AB8
+
+title NodeMedic — system architecture\n(EKS / AWS  +  kubeadm / Azure)
+
+' ============================================================
+' DETECTION PLANE — runs on every target cluster (EKS or kubeadm)
+' ============================================================
+package "Target cluster\n(EKS  |  Azure kubeadm)" as cluster {
+  node "Worker node N" as wn {
+    component "node-problem-detector\n+ CF custom plugins\n(conntrack · fd · pid · inode\n disk · dns · imds)" as npd
+  }
+  database "kube-apiserver\nNode conditions + Events" as api
+  component "NodeMedic controller\n(Go, controller-runtime;\ninformer on Node + Event;\nreconciler on NHD CR)" as ctrl
+
+  npd  --> api : signal\n(NodeCondition / Event)
+  ctrl ..> api : watch + patch CR
+}
+
+' ============================================================
+' AGENT RUNTIME — single deployment, serves all target clusters
+' ============================================================
+component "NodeMedic agent\n(Python · Claude Agent SDK)\nFastAPI: POST /diagnose" as agent
+ctrl --> agent : POST /diagnose\n{caseId, node, cluster, trigger}
+
+' ============================================================
+' TOOL PLANE — read-only investigation surface
+' ============================================================
+package "MCP servers (read-only)" as mcp {
+  component "Node-Ops\n(in-proc, SDK)\nkubectl · ssh · /proc"  as nodeops
+  component "Cloud-Info\n(in-proc, SDK)"                      as cloudinfo
+  component "New Relic\n(HTTP)\nNRQL · logs · metrics"        as nrmcp
+}
+agent --> mcp : tool calls
+
+' Cloud-Info has two backends, picked from the case's clusterName/provider tag
+package "Cloud backends" as clouds {
+  component "AWS\nec2:DescribeInstanceStatus\nhealth:DescribeEvents" as aws
+  component "Azure\nVM instance view\nResource Health"             as azure
+}
+cloudinfo --> aws
+cloudinfo --> azure
+
+nodeops --> wn : kubectl / ssh\n(read-only allow-list)
+nrmcp   --> [NR account 1\n(staging)]
+
+' ============================================================
+' ACTION PLANE
+' ============================================================
+component "Cordon executor\n(controller-side,\nconfidence-gated)" as cordon
+agent  --> cordon : status.diagnosis on NHD CR\n(controller reads, gates)
+cordon --> wn     : kubectl cordon N\n(in-cluster RBAC)
+
+component "Notifier" as notify
+cordon --> notify : Slack #cf-team-alerts\nPagerDuty (CF service)
+
+' ============================================================
+' Side notes
+' ============================================================
+note right of agent
+  system_prompt = runbook (prompt-cached)
+  permission_mode = default + allow-list
+  PreToolUse hook → audit JSONL → S3
+  max_turns / max_budget_usd capped
+  primary  = claude-opus-4-7
+  fallback = claude-sonnet-4-6
+end note
+
+note bottom of mcp
+  In-proc MCP servers (Node-Ops, Cloud-Info)
+  expose tools as @tool-decorated Python funcs
+  in the agent process — credentials and the
+  allow-list never leave the runtime.
+end note
+
+note bottom of clouds
+  Cloud backend chosen per case from
+  cluster metadata (provider=aws|azure).
+  Each backend uses a least-privilege
+  read-only IAM role / Service Principal.
+end note
+
+@enduml
