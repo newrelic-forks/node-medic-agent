@@ -1,3 +1,62 @@
+# node-problem-detector + NodeMedic Controller
+
+This fork hosts both the upstream **node-problem-detector** (NPD) and the
+Container Fabric **NodeMedic controller** (Scope 2 of the AFA 2026 hackathon).
+The two trees are namespaced separately so they don't collide.
+
+## NodeMedic controller (Scope 2)
+
+The NodeMedic controller watches NPD-flipped `NodeCondition`s, calls the
+diagnosis agent, applies the Constitution Article I.3 confidence gate, and
+(only) cordons the Node when the gate passes.
+
+**Layout** (NPD's existing tree under `pkg/`, `cmd/nodeproblemdetector/`,
+`config/plugin/`, `deployment/cf1z/` is untouched):
+- `cmd/nodemedic-controller/` — controller entrypoint
+- `api/v1alpha1/` — `NodeHealthDiagnosisAI` CRD types (frozen schema vendored from Scope 3)
+- `internal/nodemedic/{controller,agentclient,notifier,metrics,providerid}/`
+- `config/nodemedic/{crd,rbac}/` — generated CRD + hand-written RBAC
+- `deployment/helm/nodemedic-controller/` — Helm chart
+- `test/nodemedic/fixtures/` — Day-1-AM stub NHDs + Node fixtures
+- `Dockerfile.nodemedic-controller` — distroless static, multi-arch
+- Spec-kit artifacts: `.specify/specs/001-nodemedic-controller/`
+
+**Build & test**:
+```sh
+make nodemedic-generate       # controller-gen object (deepcopy)
+make nodemedic-manifests      # controller-gen crd → config/nodemedic/crd
+make nodemedic-test           # unit tests (~40, pure functions + fakes)
+make nodemedic-envtest        # integration tests (envtest apiserver+etcd)
+make nodemedic-build          # bin/nodemedic-controller
+make nodemedic-docker-build   # multi-arch container image
+make nodemedic-helm-lint      # chart lint + cluster-name guard test
+```
+
+**Install** (test clusters only — Constitution Article I.9):
+```sh
+kubectl --context=test-odd-wire create namespace cf-monitoring \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl --context=test-odd-wire -n cf-monitoring create secret generic \
+  nodemedic-agent-token --from-literal=token="$AGENT_TOKEN"
+kubectl --context=test-odd-wire -n cf-monitoring create secret generic \
+  nodemedic-slack --from-literal=webhook-url="$SLACK_WEBHOOK_URL"
+
+helm --kube-context=test-odd-wire upgrade --install nodemedic-controller \
+  ./deployment/helm/nodemedic-controller \
+  -n cf-monitoring \
+  -f deployment/helm/nodemedic-controller/values-eks.yaml \
+  --set clusterName=test-odd-wire
+```
+
+The full validation walkthrough lives at
+[`.specify/specs/001-nodemedic-controller/quickstart.md`](./.specify/specs/001-nodemedic-controller/quickstart.md).
+
+NPD's existing `Dockerfile`, Makefile targets (`make bin/node-problem-detector`,
+`make test`), and CI workflows are unchanged by the controller work.
+
+---
+
 # node-problem-detector
 
 [![Build Status](https://travis-ci.org/kubernetes/node-problem-detector.svg?branch=master)](https://travis-ci.org/kubernetes/node-problem-detector)  [![Go Report Card](https://goreportcard.com/badge/github.com/kubernetes/node-problem-detector)](https://goreportcard.com/report/github.com/kubernetes/node-problem-detector)

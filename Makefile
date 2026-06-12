@@ -447,11 +447,14 @@ nodemedic-test:
 	go test -timeout=2m -count=1 $(NODEMEDIC_PKGS)
 
 .PHONY: nodemedic-envtest
+# Integration tests use envtest's binary apiserver+etcd. They live
+# beside the production code under internal/nodemedic/controller/ but
+# are gated by `//go:build integration` so `go test ./...` stays fast.
 nodemedic-envtest:
 	@echo "Setting up envtest assets for Kubernetes $(ENVTEST_K8S_VERSION)..."
 	@$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path >/dev/null
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
-	  go test -timeout=5m -count=1 ./test/nodemedic/envtest/...
+	  go test -tags=integration -timeout=5m -count=1 ./internal/nodemedic/controller/...
 
 .PHONY: nodemedic-docker-build
 nodemedic-docker-build:
