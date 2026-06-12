@@ -102,7 +102,7 @@ This document closes every NEEDS CLARIFICATION and pins down the dependency / pa
 **Decision** Skip a button entirely. The Slack message body for `Applied` and `HumanInLoop` includes a fenced markdown block with the exact `kubectl get` command:
 
 ```
-kubectl --context=test-odd-wire -n container-fabric get nhd <name> -o yaml
+kubectl --context=test-odd-wire -n cf-monitoring get nhd <name> -o yaml
 ```
 
 The controller substitutes `<name>` and the cluster context name from `--cluster-name`. No external URL.

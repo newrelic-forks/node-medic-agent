@@ -72,7 +72,7 @@ description: "Task list for NodeMedic Controller (Scope 2 of AFA 2026 hackathon)
 ### RBAC
 
 - [x] T017 Authored `config/nodemedic/rbac/role.yaml` per spec NFR-4 — exactly `nhd` get/list/watch/create/update/patch (+ status get/update/patch); `nodes` get/list/watch/patch; `events` create/patch. Hand-written rather than controller-gen-marker-driven so the verb surface is one explicit file (easier to audit, harder to widen accidentally).
-- [x] T018 [P] Authored `config/nodemedic/rbac/role_binding.yaml` + `service_account.yaml` (namespace `container-fabric`).
+- [x] T018 [P] Authored `config/nodemedic/rbac/role_binding.yaml` + `service_account.yaml` (namespace `cf-monitoring`).
 
 ### Helm chart skeleton
 
@@ -121,7 +121,7 @@ description: "Task list for NodeMedic Controller (Scope 2 of AFA 2026 hackathon)
 - [ ] T042 [US1] Implement `internal/nodemedic/controller/case_creator.go` — `CreateCaseFor(ctx, trigger Trigger) error`: resolves provider/region/instanceId per FR-2 (using providerid.ParseAWS), builds NHD with `caseId=uuid.NewString()`, computes deterministic name, `Create` with `IgnoreAlreadyExists`, emits `MetadataResolutionFailed` Event on failure (FR-2 last paragraph)
 - [ ] T043 [US1] Implement `internal/nodemedic/controller/nhd_reconciler.go` — controller-runtime reconciler keyed on NHD; phase-machine arms for `""→Diagnosing` (calls agent client) and `Diagnosed→Acted` (calls gate, on pass calls cordon + Applied Slack); other arms TODO until US2/US3; emits `PhaseTransition` events; updates `status.conditions[]` per data-model §1.4
 - [ ] T044 [US1] Wire reconciler + nodewatcher into manager from T014 (`main.go`); register metrics counters at startup
-- [ ] T045 [P] [US1] Author `deployment/helm/nodemedic-controller/values-eks.yaml` — `clusterName: test-odd-wire`, `agentUrl: http://nodemedic-agent.container-fabric.svc:8080/diagnose`, watchedConditions list per FR-1
+- [ ] T045 [P] [US1] Author `deployment/helm/nodemedic-controller/values-eks.yaml` — `clusterName: test-odd-wire`, `agentUrl: http://nodemedic-agent.cf-monitoring.svc:8080/diagnose`, watchedConditions list per FR-1
 - [ ] T046 [US1] Update `README.md` quickstart section — link to [`quickstart.md`](./quickstart.md), document `make docker-build` + `helm install` flow per research R-3
 - [ ] T047 [US1] Run [`quickstart.md`](./quickstart.md) Scenario A end-to-end on `test-odd-wire` against the T026 canned NHD; capture `kubectl get nhd -o yaml` output and `kubectl describe node` showing `SchedulingDisabled` as artifacts; verify AC-1, AC-2, AC-3
 - [ ] T048 [US1] Run quickstart Scenario D (debounce, AC-6) and Scenario G (restart, AC-9) on the same cluster

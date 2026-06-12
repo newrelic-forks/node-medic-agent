@@ -30,7 +30,7 @@ config:
   minConfidence: 0.7
   minEvidenceSources: 2
   # Agent service URL receiving POST /diagnose.
-  agentURL: "http://nodemedic-agent.container-fabric.svc:8080/diagnose"
+  agentURL: "http://nodemedic-agent.cf-monitoring.svc:8080/diagnose"
   # Per (node, condition) debounce window for trigger detection (FR-1).
   debounceWindow: "30s"
 

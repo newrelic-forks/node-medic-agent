@@ -48,17 +48,17 @@ This same CRD applies on the Azure cluster — Constitution Article II.7 (one bi
 ### 3. Install Helm chart on EKS test cluster
 
 ```sh
-kubectl --context=test-odd-wire create namespace container-fabric --dry-run=client -o yaml | kubectl apply -f -
+kubectl --context=test-odd-wire create namespace cf-monitoring --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl --context=test-odd-wire -n container-fabric create secret generic nodemedic-slack \
+kubectl --context=test-odd-wire -n cf-monitoring create secret generic nodemedic-slack \
   --from-literal=webhook-url="$SLACK_WEBHOOK_URL"
 
-kubectl --context=test-odd-wire -n container-fabric create secret generic nodemedic-agent-token \
+kubectl --context=test-odd-wire -n cf-monitoring create secret generic nodemedic-agent-token \
   --from-literal=token="$AGENT_TOKEN"
 
 helm --kube-context=test-odd-wire upgrade --install nodemedic-controller \
   ./deployment/helm/nodemedic-controller \
-  -n container-fabric \
+  -n cf-monitoring \
   -f deployment/helm/nodemedic-controller/values-eks.yaml \
   --set clusterName=test-odd-wire
 ```
@@ -68,9 +68,9 @@ The chart's `_helpers.tpl` will refuse to install if `clusterName` doesn't start
 ### 4. Verify the controller is healthy
 
 ```sh
-kubectl --context=test-odd-wire -n container-fabric get pods -l app=nodemedic-controller
-kubectl --context=test-odd-wire -n container-fabric logs -l app=nodemedic-controller --tail=50
-kubectl --context=test-odd-wire -n container-fabric port-forward svc/nodemedic-controller 9443:9443 &
+kubectl --context=test-odd-wire -n cf-monitoring get pods -l app=nodemedic-controller
+kubectl --context=test-odd-wire -n cf-monitoring logs -l app=nodemedic-controller --tail=50
+kubectl --context=test-odd-wire -n cf-monitoring port-forward svc/nodemedic-controller 9443:9443 &
 curl -s localhost:9443/metrics | grep nodemedic_
 ```
 
@@ -90,7 +90,7 @@ Map to spec §4 "Walkthrough — happy path".
    ```
 2. Within **5 s**: an NHD CR appears.
    ```sh
-   kubectl --context=test-odd-wire -n container-fabric get nhd
+   kubectl --context=test-odd-wire -n cf-monitoring get nhd
    # NAME                                    PHASE       NODE                       PROVIDER   ...
    ```
    Verify `spec.case.provider=aws`, `spec.case.region=us-east-2`, `spec.case.instanceId=i-...` are all populated (FR-2).
@@ -106,7 +106,7 @@ Map to spec §4 "Walkthrough — gate failure".
 
 1. Hand-edit a stub NHD's `status.diagnosis` to `confidence: 0.5, evidence: [{source: nrql}, {source: ssh}], recommendation: {action: Cordon}`:
    ```sh
-   kubectl --context=test-odd-wire -n container-fabric edit nhd <name>
+   kubectl --context=test-odd-wire -n cf-monitoring edit nhd <name>
    # set status.phase=Diagnosed, fill status.diagnosis as above
    ```
 2. Within **5 s**: controller's reconciler runs the gate, finds `confidence < 0.7`, sets `status.action.decision=HumanInLoop`, `phase=Acted`, posts a Slack message with the "needs human review" framing.
@@ -121,7 +121,7 @@ Map to spec §4 "Walkthrough — agent timeout".
 1. Configure the controller's `--agent-url` to point at a black-hole endpoint (e.g. a `nginx` Pod returning 202 then never updating any CR):
    ```sh
    helm --kube-context=test-odd-wire upgrade nodemedic-controller ... \
-     --set agentUrl=http://blackhole.container-fabric.svc:8080/diagnose
+     --set agentUrl=http://blackhole.cf-monitoring.svc:8080/diagnose
    ```
 2. Inject a fault as in Scenario A.
 3. Wait for the deadline: `spec.budgets.deadline = observedAt + 60s`. After ~60 s, the controller marks the NHD `Failed{reason=DeadlineExceeded}` and re-issues `POST /diagnose` once with the same `caseId` (FR-7).
@@ -138,7 +138,7 @@ Inject the same fault twice within 30 s on the same node. Verify only one NHD is
 make inject-conntrack CLUSTER=test-odd-wire NODE=node-a
 sleep 5
 make inject-conntrack CLUSTER=test-odd-wire NODE=node-a
-kubectl --context=test-odd-wire -n container-fabric get nhd | grep node-a
+kubectl --context=test-odd-wire -n cf-monitoring get nhd | grep node-a
 # expect exactly one row
 ```
 
@@ -163,7 +163,7 @@ Repeat Scenarios A through C on the Azure kubeadm test cluster:
 ```sh
 helm --kube-context=cf1z upgrade --install nodemedic-controller \
   ./deployment/helm/nodemedic-controller \
-  -n container-fabric \
+  -n cf-monitoring \
   -f deployment/helm/nodemedic-controller/values-azure.yaml \
   --set clusterName=cf1z
 ```
@@ -174,7 +174,7 @@ Verify the NHD's `spec.case.provider=azure`, `spec.case.region=eastus2` (or your
 
 1. Start Scenario A. As soon as `phase=Diagnosing` is observed, kill the controller pod:
    ```sh
-   kubectl --context=test-odd-wire -n container-fabric delete pod -l app=nodemedic-controller
+   kubectl --context=test-odd-wire -n cf-monitoring delete pod -l app=nodemedic-controller
    ```
 2. The Deployment restarts. The new pod's reconciler picks up the existing NHD by informer cache rebuild.
 3. Verify: case completes successfully (cordon + Slack), with at most one duplicate Slack post (acceptable per FR-11).
@@ -184,7 +184,7 @@ Verify the NHD's `spec.case.provider=azure`, `spec.case.region=eastus2` (or your
 After running Scenarios A–G:
 
 ```sh
-kubectl --context=test-odd-wire -n container-fabric port-forward svc/nodemedic-controller 9443:9443 &
+kubectl --context=test-odd-wire -n cf-monitoring port-forward svc/nodemedic-controller 9443:9443 &
 curl -s localhost:9443/metrics | grep nodemedic_
 ```
 
@@ -205,13 +205,13 @@ Before the agent integration is live, exercise the controller against canned NHD
 
 ```sh
 # Apply a hand-canned NHD with phase=Diagnosed and a known-good diagnosis
-kubectl --context=test-odd-wire -n container-fabric apply -f test/nodemedic/fixtures/nhd-applied.yaml
+kubectl --context=test-odd-wire -n cf-monitoring apply -f test/nodemedic/fixtures/nhd-applied.yaml
 
 # Watch the reconciler
-kubectl --context=test-odd-wire -n container-fabric get nhd -w
+kubectl --context=test-odd-wire -n cf-monitoring get nhd -w
 
 # Apply a known-bad diagnosis (gate fail)
-kubectl --context=test-odd-wire -n container-fabric apply -f test/nodemedic/fixtures/nhd-humaninloop.yaml
+kubectl --context=test-odd-wire -n cf-monitoring apply -f test/nodemedic/fixtures/nhd-humaninloop.yaml
 ```
 
 This is the integration handshake with Scope 1 (fault injection) and Scope 3 (agent).
@@ -221,8 +221,8 @@ This is the integration handshake with Scope 1 (fault injection) and Scope 3 (ag
 ## Cleanup
 
 ```sh
-helm --kube-context=test-odd-wire uninstall nodemedic-controller -n container-fabric
-kubectl --context=test-odd-wire -n container-fabric delete nhd --all
+helm --kube-context=test-odd-wire uninstall nodemedic-controller -n cf-monitoring
+kubectl --context=test-odd-wire -n cf-monitoring delete nhd --all
 # CRD persists due to helm.sh/resource-policy: keep — delete by hand if needed:
 kubectl --context=test-odd-wire delete crd nodehealthdiagnosisais.nodemedic.cf.newrelic.com
 # Manually uncordon any nodes left cordoned:

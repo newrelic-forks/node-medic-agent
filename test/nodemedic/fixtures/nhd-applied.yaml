@@ -4,7 +4,7 @@
 # agent being live yet.
 #
 # Usage:
-#   kubectl --context=test-odd-wire -n container-fabric apply \
+#   kubectl --context=test-odd-wire -n cf-monitoring apply \
 #     -f test/nodemedic/fixtures/nhd-applied.yaml
 #
 # The controller's reconciler observes phase=Diagnosed and a diagnosis
@@ -20,7 +20,7 @@ apiVersion: nodemedic.cf.newrelic.com/v1alpha1
 kind: NodeHealthDiagnosisAI
 metadata:
   name: ip-10-1-2-3-applied-fixture
-  namespace: container-fabric
+  namespace: cf-monitoring
 spec:
   case:
     caseId: 8f3c1e2a-9b4d-4f7a-9c1e-2a9b4d4f7a9c

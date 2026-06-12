@@ -158,7 +158,7 @@ func parseFlags() options {
 		"minimum number of distinct evidence sources for the gate to pass")
 
 	fs.StringVar(&opts.agentURL, "agent-url",
-		"http://nodemedic-agent.container-fabric.svc:8080/diagnose",
+		"http://nodemedic-agent.cf-monitoring.svc:8080/diagnose",
 		"agent service URL receiving POST /diagnose")
 
 	fs.StringVar(&opts.clusterName, "cluster-name", "",

@@ -2,7 +2,7 @@
 
 **Authority**: `nodemedic-scope.md` §3 (cross-scope contract). This file is the controller-side reference + frozen golden bodies for golden-file testing.
 
-**Direction**: controller → agent. **Auth**: bearer token from `Secret/nodemedic-agent-token`. **Default URL**: `http://nodemedic-agent.container-fabric.svc:8080/diagnose` (overridable via `--agent-url`).
+**Direction**: controller → agent. **Auth**: bearer token from `Secret/nodemedic-agent-token`. **Default URL**: `http://nodemedic-agent.cf-monitoring.svc:8080/diagnose` (overridable via `--agent-url`).
 
 ---
 
@@ -10,7 +10,7 @@
 
 ```http
 POST /diagnose HTTP/1.1
-Host: nodemedic-agent.container-fabric.svc:8080
+Host: nodemedic-agent.cf-monitoring.svc:8080
 Authorization: Bearer <token>
 Content-Type: application/json
 Content-Length: <n>
