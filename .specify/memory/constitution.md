@@ -27,7 +27,7 @@ The agent acts on production-shaped infrastructure. Auto-cordon is only defensib
 6. **Permission mode = `default`.** Never `bypassPermissions`. Not for "the demo," not for "just this run."
 7. **Every tool call is audited.** `PreToolUse` hook writes `{caseId, ts, tool, argsHash, allowed, reason}` to the audit JSONL. Audit log is part of the deliverable, not an optional extra.
 8. **Hard caps on the loop.** `max_turns` and `max_budget_usd` are enforced; exceeding either ends the case as `Failed` with a reason. No "just one more turn" override.
-9. **Test clusters only.** Fault injection and demos run on `test-*` clusters (EKS) or designated kubeadm test clusters on Azure. Never `stg-*`, `us-*`, or `eu-*`.
+9. **Test clusters only.** Fault injection and demos run on `cf1z` clusters (EKS) or designated kubeadm test clusters on Azure. Never `stg-*`, `us-*`, or `eu-*`.
 
 **Rule of thumb:** if a change reduces the safety surface, it needs sign-off from at least one captain outside the scope making the change.
 

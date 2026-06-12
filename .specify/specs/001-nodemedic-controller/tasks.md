@@ -190,7 +190,7 @@ description: "Task list for NodeMedic Controller (Scope 2 of AFA 2026 hackathon)
 ### Implementation for User Story 4
 
 - [ ] T065 [US4] Implement `ParseAzure(providerID string) (vmName string, err error)` in `internal/nodemedic/providerid/parse.go`; update the URI-scheme dispatcher to route to ParseAzure for `azure://`
-- [ ] T066 [US4] [P] Author `deployment/helm/nodemedic-controller/values-azure.yaml` — `clusterName: test-aks-cf-1` (or actual chosen Azure test cluster name), watchedConditions list, agentUrl
+- [ ] T066 [US4] [P] Author `deployment/helm/nodemedic-controller/values-azure.yaml` — `clusterName: cf1z` (the legacy CF Azure kubeadm test cluster, per Constitution Article I.9), watchedConditions list, agentUrl
 - [ ] T067 [US4] Run [`quickstart.md`](./quickstart.md) Scenario F end-to-end on the Azure test cluster; capture `kubectl get nhd -o yaml` showing `provider=azure`, region resolved from Azure cloud-controller-manager labels, instanceId = VM name; verify AC-8
 
 **Checkpoint**: AC-8 green. One binary, two clouds (Constitution II.7) is demonstrated.

@@ -11,7 +11,7 @@ A validation guide, not an implementation walkthrough. Each scenario maps to one
 ## Prerequisites
 
 - Go 1.25.x (`go version`)
-- `kubectl` 1.28+ with contexts configured: `test-odd-wire` (EKS) and your designated Azure kubeadm test cluster (e.g. `test-aks-cf-1`).
+- `kubectl` 1.28+ with contexts configured: `test-odd-wire` (AWS/EKS) and `cf1z` (the Azure kubeadm test cluster — legacy CF naming, sister to jc1z / sk1z).
 - `helm` v3.14+
 - `setup-envtest` for envtest-based tests: `go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest`
 - A Slack incoming webhook URL pointing at `#nodemedic-demo` (test channel; do NOT reuse a production webhook).
@@ -161,11 +161,11 @@ kubectl --context=test-odd-wire get node <n> -o jsonpath='{.spec.unschedulable}'
 Repeat Scenarios A through C on the Azure kubeadm test cluster:
 
 ```sh
-helm --kube-context=test-aks-cf-1 upgrade --install nodemedic-controller \
+helm --kube-context=cf1z upgrade --install nodemedic-controller \
   ./deployment/helm/nodemedic-controller \
   -n container-fabric \
   -f deployment/helm/nodemedic-controller/values-azure.yaml \
-  --set clusterName=test-aks-cf-1
+  --set clusterName=cf1z
 ```
 
 Verify the NHD's `spec.case.provider=azure`, `spec.case.region=eastus2` (or your cluster's region), `spec.case.instanceId=<VM name>`. Same code path, different fixture. Constitution Article II.7 acceptance.

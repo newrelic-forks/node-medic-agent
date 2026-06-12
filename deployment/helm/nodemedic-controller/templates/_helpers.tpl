@@ -13,10 +13,10 @@ validateClusterName).
 {{- define "nodemedic.requireTestCluster" -}}
 {{- $name := .Values.clusterName -}}
 {{- if not $name -}}
-{{- fail "ERROR: .Values.clusterName is required (Constitution Article I.9 — test clusters only). Pass --set clusterName=test-<...>." -}}
+{{- fail "ERROR: .Values.clusterName is required (Constitution Article I.9 — test clusters only). Pass --set clusterName=cf1z (Azure kubeadm) or --set clusterName=test-<...> (AWS/EKS test cluster)." -}}
 {{- end -}}
-{{- if not (hasPrefix "test-" $name) -}}
-{{- fail (printf "ERROR: .Values.clusterName=%q must start with `test-` (Constitution Article I.9 — test clusters only)." $name) -}}
+{{- if and (ne $name "cf1z") (not (hasPrefix "test-" $name)) -}}
+{{- fail (printf "ERROR: .Values.clusterName=%q must be either `cf1z` (Azure kubeadm) or start with `test-` (AWS/EKS test clusters) (Constitution Article I.9 — test clusters only)." $name) -}}
 {{- end -}}
 {{- $name -}}
 {{- end -}}

@@ -464,11 +464,17 @@ nodemedic-docker-build:
 .PHONY: nodemedic-helm-lint
 nodemedic-helm-lint:
 	helm lint $(NODEMEDIC_HELM_DIR)
-	helm template $(NODEMEDIC_HELM_DIR) --set clusterName=test-foo >/dev/null
-	@echo "Verifying cluster-name guard rejects non-test clusters..."
+	@echo "Verifying cluster-name guard accepts cf1z (Azure kubeadm)..."
+	helm template $(NODEMEDIC_HELM_DIR) --set clusterName=cf1z >/dev/null
+	@echo "Verifying cluster-name guard accepts test-* (AWS/EKS)..."
+	helm template $(NODEMEDIC_HELM_DIR) --set clusterName=test-odd-wire >/dev/null
+	@echo "Verifying cluster-name guard rejects production-shaped names..."
 	@! helm template $(NODEMEDIC_HELM_DIR) --set clusterName=stg-foo >/dev/null 2>&1 \
 	  && echo "OK: helm template refused stg-foo (Constitution Article I.9)" \
 	  || (echo "FAIL: helm template should reject clusterName=stg-foo per Constitution Article I.9" && exit 1)
+	@! helm template $(NODEMEDIC_HELM_DIR) --set clusterName=us-big-cone >/dev/null 2>&1 \
+	  && echo "OK: helm template refused us-big-cone (Constitution Article I.9)" \
+	  || (echo "FAIL: helm template should reject clusterName=us-big-cone per Constitution Article I.9" && exit 1)
 
 .PHONY: nodemedic-helm-package
 nodemedic-helm-package:

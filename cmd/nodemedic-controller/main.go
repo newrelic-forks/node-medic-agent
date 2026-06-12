@@ -181,15 +181,24 @@ func parseFlags() options {
 }
 
 // validateClusterName enforces Constitution Article I.9 at the binary
-// level: the controller refuses to start if --cluster-name is missing
-// or doesn't start with the literal prefix `test-`.
+// level: the controller refuses to start unless --cluster-name is one of
+//   - "cf1z" (the Azure kubeadm test cluster used for the hackathon —
+//     legacy CF naming alongside jc1z / sk1z)
+//   - any name with a "test-" prefix (AWS/EKS test clusters, e.g.
+//     "test-odd-wire")
+// Anything else — empty, "stg-*", "us-*", "eu-*", or other production
+// shapes — is rejected before the manager comes up.
 func validateClusterName(name string) error {
 	if name == "" {
 		return errors.New("--cluster-name is required (Constitution Article I.9)")
 	}
-	if !strings.HasPrefix(name, "test-") {
-		return fmt.Errorf("--cluster-name=%q must start with `test-` "+
-			"(Constitution Article I.9: test clusters only)", name)
+	if name == "cf1z" {
+		return nil
 	}
-	return nil
+	if strings.HasPrefix(name, "test-") {
+		return nil
+	}
+	return fmt.Errorf("--cluster-name=%q must be either `cf1z` (Azure kubeadm) "+
+		"or start with `test-` (AWS/EKS test clusters) "+
+		"(Constitution Article I.9: test clusters only)", name)
 }
