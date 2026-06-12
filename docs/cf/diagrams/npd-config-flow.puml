@@ -1,0 +1,72 @@
+@startuml npd-config-flow
+' How an operator's config decisions translate into NPD runtime behavior
+' smetana is PlantUML's built-in layout engine — no external graphviz/dot needed.
+!pragma layout smetana
+skinparam shadowing false
+skinparam linetype ortho
+skinparam rectangleBackgroundColor #FAFAFA
+
+title NPD config → runtime behavior
+
+rectangle "Operator authoring" as auth {
+  file "kernel-monitor.json"         as f1
+  file "system-stats-monitor.json"   as f2
+  file "custom-plugin-monitor.json"  as f3
+  file "health-checker-kubelet.json" as f4
+  file "systemd-monitor-counter.json" as f5
+}
+
+rectangle "DaemonSet command flags" as flags {
+  note as n1
+  --config.system-log-monitor=
+    /config/kernel-monitor.json,
+    /config/readonly-monitor.json,
+    /config/docker-monitor.json
+  --config.system-stats-monitor=...
+  --config.custom-plugin-monitor=
+    /config/custom-plugin-monitor.json,
+    /config/health-checker-kubelet.json,
+    /config/systemd-monitor-counter.json
+  --enable-k8s-exporter=true
+  --prometheus-port=20257
+  --port=20256
+  end note
+}
+
+rectangle "NPD runtime" as rt {
+  component "1× SystemLogMonitor\nper file" as r_slm
+  component "1× SystemStatsMonitor\nper file" as r_ssm
+  component "1× CustomPluginMonitor\nper file" as r_cpm
+}
+
+rectangle "Effects on apiserver / scrape" as eff {
+  database "Node.status.conditions[]\n(KernelDeadlock, KubeletUnhealthy,\nFrequentKubeletRestart, ...)" as nc
+  database "Events\n(Source.Component=<rule.source>)" as ev
+  database "Prometheus :20257\n(stats only — no Conditions)" as pr
+}
+
+f1 --> flags : --config.system-log-monitor
+f2 --> flags : --config.system-stats-monitor
+f3 --> flags : --config.custom-plugin-monitor
+f4 --> flags : --config.custom-plugin-monitor
+f5 --> flags : --config.custom-plugin-monitor
+
+flags --> r_slm
+flags --> r_ssm
+flags --> r_cpm
+
+r_slm --> nc
+r_slm --> ev
+r_cpm --> nc
+r_cpm --> ev
+r_ssm --> pr
+
+note bottom of r_cpm
+  HealthChecker and systemd-monitor-counter
+  are *not* separate daemons — they are
+  CustomPluginMonitor configs that exec
+  the bundled `health-checker` and
+  `log-counter` binaries.
+end note
+
+@enduml

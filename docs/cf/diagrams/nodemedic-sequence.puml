@@ -1,0 +1,88 @@
+@startuml nodemedic-sequence
+' NodeMedic — end-to-end flow across Scopes 1/2/3
+' Sequence diagrams don't need graphviz, no smetana pragma required.
+skinparam shadowing false
+skinparam sequence {
+  ArrowColor #444
+  LifeLineBorderColor #888
+  ParticipantBorderColor #555
+  ParticipantBackgroundColor #FAFAFA
+}
+
+title NodeMedic — controller ↔ agent ↔ CR ↔ cordon\n(target cluster: EKS or kubeadm/Azure;\n example: ConntrackSaturated on node N)
+
+actor      "Operator\n(demo)"                              as op
+participant "Worker node N\n(NPD + plugins)"               as npd
+participant "kube-apiserver"                               as api
+participant "NodeMedic controller\n(Scope 2)"              as ctrl
+participant "NodeMedic agent\n(Scope 3)"                   as agent
+participant "MCP tools\n(node-ops · cloud-info · NR)"      as tools
+participant "Slack / PagerDuty"                            as notify
+
+== Scope 1 — fault injection & detection ==
+op   -> npd : make inject-conntrack
+npd  -> npd : conntrack.sh exits 1\n(every 10s tick)
+npd  -> api : PATCH /nodes/N/status\nNodeCondition ConntrackSaturated=True
+npd  -> api : POST Event\n{reason:"ConntrackHigh", source:"conntrack-monitor"}
+
+== Scope 2 — case creation ==
+api  --> ctrl : watch Node + Event\n(predicate: type ∈ watched-conditions, status=True)
+ctrl -> ctrl : debounce 30s per (node, condition)\ngenerate caseId (UUIDv4)
+ctrl -> api : CREATE NodeHealthDiagnosisAI/<node>-<ts>\nspec.case={...}\nstatus.phase="Pending"
+
+== Scope 2 → Scope 3 — invoke agent ==
+ctrl -> agent : POST /diagnose\n{caseId, nodeName, clusterName, trigger, budgets}\nAuthorization: Bearer …
+agent --> ctrl : 202 Accepted\n{caseId, status:"queued"}
+ctrl -> api : PATCH NHD status.phase="Diagnosing"\nconditions[AgentInvoked]=True
+
+== Scope 3 — diagnostic loop ==
+note over agent
+  ClaudeSDKClient with:
+   system_prompt = runbook (cached)
+   permission_mode = default
+   can_use_tool   = allow-list
+   PreToolUse hook → audit JSONL
+   max_turns / max_budget_usd capped
+end note
+
+loop until emit_report or budget exhausted
+  agent -> tools : tool call\n(kubectl_get / nrql / ssh_run / read_proc_file /\n cloud_info.describe — AWS or Azure backend\n picked from cluster.provider tag)
+  tools --> agent : result (truncated 4KB)
+  agent -> agent : PreToolUse hook → audit log
+end
+
+agent -> agent : validate ≥2 distinct evidence sources\nbuild diagnosis object
+agent -> api  : UPDATE NHD status\n.diagnosis={rootCause, confidence,\n           evidence[], recommendation}\n.phase="Diagnosed"
+
+== Scope 2 — gate & act ==
+api  --> ctrl : watch NHD update
+ctrl -> ctrl : confidenceGate(nhd):\n confidence ≥ 0.7\n ∧ |distinct sources| ≥ 2\n ∧ recommendation ∈ {Cordon, DrainAndCordon}
+
+alt gate passes
+  ctrl -> api : PATCH Node N\nspec.unschedulable=true
+  api  --> ctrl : ok
+  ctrl -> notify : Slack post → #cf-team-alerts\nPagerDuty trigger (severity=warning,\n  dedup_key=nodemedic-<caseId>)
+  ctrl -> api : PATCH NHD\n.action.decision="Applied"\n.phase="Acted"\nconditions[ActionApplied]=True
+else gate fails
+  ctrl -> notify : PagerDuty trigger\nseverity=critical\nsummary="Needs human review"
+  ctrl -> api : PATCH NHD\n.action.decision="HumanInLoop"\n.phase="Acted"
+end
+
+== terminal ==
+op   -> api : kubectl get node N\n(observes SchedulingDisabled)
+
+note right of ctrl
+  Phase machine:
+  Pending → Diagnosing → Diagnosed
+  → (Evaluating → Evaluated)?  ← post-hackathon
+  → Acted | Failed (terminal)
+end note
+
+note right of agent
+  emit_report is the **terminal tool**:
+  validates schema + evidence count,
+  writes the CR, then ends the loop.
+  Audit JSONL flushed to S3 on exit.
+end note
+
+@enduml

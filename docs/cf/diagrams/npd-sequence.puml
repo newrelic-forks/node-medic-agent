@@ -1,0 +1,56 @@
+@startuml npd-sequence
+' NPD detection → apiserver propagation sequence
+skinparam shadowing false
+skinparam sequence {
+  ArrowColor #444
+  LifeLineBorderColor #888
+  ParticipantBorderColor #555
+  ParticipantBackgroundColor #FAFAFA
+}
+
+title NPD detection → apiserver propagation\n(example: kernel OOM-kill on node N)
+
+actor "Linux kernel" as kern
+participant "/dev/kmsg" as kmsg
+participant "SystemLogMonitor\n(NPD goroutine)" as slm
+participant "ProblemDetector\nfan-in / fan-out" as core
+participant "ConditionManager\n(updates map)" as cmgr
+participant "K8s Exporter" as k8sexp
+participant "kube-apiserver" as api
+participant "Operator / Controller\n(watches Node + Events)" as obs
+
+== detection ==
+kern -> kmsg : OOM-kill log line\n("Killed process 1234 ...")
+slm  -> kmsg : streaming read
+slm  -> slm  : regex match\n(rule type=temporary, reason=OOMKilling)
+slm  -> core : *types.Status\n{Events:[{Severity:Warn, Reason:OOMKilling, Message:...}]}
+
+== fan-out to exporters ==
+core -> k8sexp : ExportProblems(*Status)
+note right of k8sexp
+  Events (transient) →
+    record.EventRecorder.Eventf
+  Conditions (permanent) →
+    queued in ConditionManager
+end note
+
+== Event path (transient) ==
+k8sexp -> api : POST /api/v1/namespaces/<ns>/events\nSource.Component="kernel-monitor"\nReason="OOMKilling"\nMessage=<log line>
+api    --> obs : watch Event (field-selector\ninvolvedObject.name=N)
+
+== Condition path (permanent) ==
+note over cmgr
+  ConditionManager loop:
+  - update tick = 1s
+  - resync tick = 10s
+  - heartbeat = 5m
+  pkg/exporters/k8sexporter/condition/manager.go
+end note
+cmgr -> api : PATCH /api/v1/nodes/N/status\n{"status":{"conditions":[...]}}
+api  --> obs : watch Node\n(diff status.conditions[])
+
+== continuation ==
+obs -> obs : evaluate (Condition Type matches\nNPD-known set, e.g. KernelDeadlock)
+obs ->] : trigger downstream\n(e.g. NodeMedic agent run)
+
+@enduml
