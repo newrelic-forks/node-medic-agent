@@ -58,8 +58,10 @@ spec:
             # System log monitors. NOT loading kernel-monitor.json here —
             # the helm NPD already loads it and owns Kernel/Xfs/Cper conditions.
             - --config.system-log-monitor=/config/readonly-monitor.json,/config/systemd-monitor.json
-            # Host-level Prometheus metrics.
-            - --config.system-stats-monitor=/config/system-stats-monitor.json
+            # Host-level Prometheus metrics. Our copy drops disk/bytes_used
+            # and disk/percent_used to avoid statfs() noise on host mount
+            # points the container can't see (e.g. /boot/efi).
+            - --config.system-stats-monitor=/etc/cf1z/configs/system-stats-monitor.json
             # Our cf1z-aware health probes (replace upstream's broken
             # crictl/systemctl-dependent ones).
             - --config.custom-plugin-monitor=/etc/cf1z/configs/check-kubelet.json,/etc/cf1z/configs/check-containerd.json
@@ -157,6 +159,8 @@ spec:
                 path: check-kubelet.json
               - key: check-containerd.json
                 path: check-containerd.json
+              - key: system-stats-monitor.json
+                path: system-stats-monitor.json
         - name: medic-probes
           configMap:
             name: node-medic-agent-cf1z
