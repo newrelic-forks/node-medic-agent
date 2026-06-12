@@ -4,15 +4,15 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: node-medic-agent
+  name: hack-node-problem-detector
   namespace: cf-monitoring
   labels:
-    app.kubernetes.io/name: node-medic-agent
+    app.kubernetes.io/name: hack-node-problem-detector
     app.kubernetes.io/managed-by: hackathon-2026
 spec:
   clusterIP: None
   selector:
-    app.kubernetes.io/name: node-medic-agent
+    app.kubernetes.io/name: hack-node-problem-detector
     app.kubernetes.io/component: detector
   ports:
     - name: prom

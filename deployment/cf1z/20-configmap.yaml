@@ -1,22 +1,69 @@
-# node-medic-agent configs and probes.
+# hack-node-problem-detector configs and probes.
 #
-# Two logical groups in one ConfigMap (with per-item modes so probes get +x):
-#   1. Custom-plugin-monitor JSON configs that wire up our probes to NPD's
+# Three logical groups in one ConfigMap (with per-item modes so probes get +x):
+#   1. system-log-monitor JSON config absorbed from the helm-managed NPD
+#      (cf-kernel-monitor.json — Azure SR-IOV + disk I/O kernel rules).
+#   2. Custom-plugin-monitor JSON configs that wire up our probes to NPD's
 #      condition-emission machinery.
-#   2. Bash probe scripts invoked by those configs. We ship the scripts here
+#   3. Bash probe scripts invoked by those configs. We ship the scripts here
 #      rather than building a custom NPD image so iteration is fast.
 #
-# Replaces the original `*-overrides` ConfigMap that wrapped the upstream
-# health-checker (which depended on crictl/systemctl, neither in the image).
+# After consolidation (June 2026), this DaemonSet replaces the helm-managed
+# `node-problem-detector-dev-cf1z`. See deployment/cf1z/README.md.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: node-medic-agent-cf1z
+  name: hack-node-problem-detector
   namespace: cf-monitoring
   labels:
-    app.kubernetes.io/name: node-medic-agent
+    app.kubernetes.io/name: hack-node-problem-detector
     app.kubernetes.io/managed-by: hackathon-2026
 data:
+  # ---- cf-kernel-monitor.json (mode 0644) ----
+  #
+  # Absorbed verbatim from the helm CM `node-problem-detector-dev-cf1z-custom-config`
+  # with one rule pruned: the helm copy's OOMKilling rule used the legacy kernel
+  # pattern "Out of memory: Kill process" which doesn't match modern (>=4.x)
+  # kernels. The image-bundled /config/kernel-monitor.json carries the canonical
+  # OOMKilling rule with the modern "Out of memory: Killed process …" pattern,
+  # so we let that one own OOM-event emission.
+  #
+  # Kept rules (Azure SR-IOV + filesystem I/O):
+  #   SYNFlood, VFRemoved, VFRegistered      — Azure SR-IOV NIC churn
+  #   DiskIOError                            — broader than NPD's Ext4Error
+  #                                            (also matches XFS / generic I/O)
+  cf-kernel-monitor.json: |
+    {
+      "plugin": "kmsg",
+      "logPath": "/dev/kmsg",
+      "lookback": "5m",
+      "bufferSize": 10,
+      "source": "cf-kernel-monitor",
+      "metricsReporting": true,
+      "rules": [
+        {
+          "type": "temporary",
+          "reason": "SYNFlood",
+          "pattern": "Possible SYN flooding.*"
+        },
+        {
+          "type": "temporary",
+          "reason": "VFRemoved",
+          "pattern": "VF unregistering.*"
+        },
+        {
+          "type": "temporary",
+          "reason": "VFRegistered",
+          "pattern": "VF registering.*"
+        },
+        {
+          "type": "temporary",
+          "reason": "DiskIOError",
+          "pattern": ".*I/O error, dev.*|.*EXT4-fs error.*|.*XFS.*I/O error.*"
+        }
+      ]
+    }
+
   # ---- system-stats-monitor config (mode 0644) ----
   #
   # Same as the image-bundled /config/system-stats-monitor.json minus the two
@@ -92,7 +139,7 @@ data:
         "max_output_length": 200,
         "concurrency": 1
       },
-      "source": "node-medic-agent-kubelet",
+      "source": "hack-npd-kubelet",
       "metricsReporting": true,
       "conditions": [
         {
@@ -121,7 +168,7 @@ data:
         "max_output_length": 200,
         "concurrency": 1
       },
-      "source": "node-medic-agent-containerd",
+      "source": "hack-npd-containerd",
       "metricsReporting": true,
       "conditions": [
         {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check-kubelet-healthz.sh — node-medic-agent probe for kubelet liveness.
+# check-kubelet-healthz.sh — hack-node-problem-detector probe for kubelet liveness.
 #
 # Probes kubelet's read-only healthz endpoint (default 127.0.0.1:10248/healthz).
 # Same endpoint kubelet itself uses for startup/liveness probes — if this

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check-containerd.sh — node-medic-agent probe for containerd liveness.
+# check-containerd.sh — hack-node-problem-detector probe for containerd liveness.
 #
 # Coarse liveness check that does NOT depend on crictl, grpcurl, or any
 # binary that isn't in NPD's debian-base image. Two assertions:

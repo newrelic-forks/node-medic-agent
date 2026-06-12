@@ -1,30 +1,30 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: node-medic-agent
+  name: hack-node-problem-detector
   namespace: cf-monitoring
   labels:
-    app.kubernetes.io/name: node-medic-agent
+    app.kubernetes.io/name: hack-node-problem-detector
     app.kubernetes.io/managed-by: hackathon-2026
     app.kubernetes.io/component: detector
-    app.kubernetes.io/version: v0.8.24-baseline
+    app.kubernetes.io/version: v0.8.24-consolidated
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: node-medic-agent
+      app.kubernetes.io/name: hack-node-problem-detector
       app.kubernetes.io/component: detector
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: node-medic-agent
+        app.kubernetes.io/name: hack-node-problem-detector
         app.kubernetes.io/managed-by: hackathon-2026
         app.kubernetes.io/component: detector
-        app.kubernetes.io/version: v0.8.24-baseline
+        app.kubernetes.io/version: v0.8.24-consolidated
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "20267"
     spec:
-      serviceAccountName: node-medic-agent
+      serviceAccountName: hack-node-problem-detector
       # hostNetwork: kubelet's healthz binds to 127.0.0.1:10248 by default;
       # we need to share the host's loopback to reach it.
       # hostPID: our containerd probe walks the host process table to verify
@@ -55,9 +55,16 @@ spec:
             - /node-problem-detector
             - --logtostderr
             - --v=2
-            # System log monitors. NOT loading kernel-monitor.json here —
-            # the helm NPD already loads it and owns Kernel/Xfs/Cper conditions.
-            - --config.system-log-monitor=/config/readonly-monitor.json,/config/systemd-monitor.json
+            # System log monitors. After consolidation (June 2026) this single
+            # DaemonSet replaces the helm-managed NPD and now loads:
+            #   readonly-monitor.json       — image-bundled, ReadonlyFilesystem condition
+            #   systemd-monitor.json        — image-bundled, journald-sourced events
+            #   kernel-monitor.json         — image-bundled, owns KernelDeadlock /
+            #                                 XfsShutdown / CperHardwareErrorFatal
+            #                                 conditions + OOMKilling/Ext4Error events
+            #   cf-kernel-monitor.json      — Azure SR-IOV + DiskIOError rules
+            #                                 (absorbed from the helm CM)
+            - --config.system-log-monitor=/config/readonly-monitor.json,/config/systemd-monitor.json,/config/kernel-monitor.json,/etc/cf1z/configs/cf-kernel-monitor.json
             # Host-level Prometheus metrics. Our copy drops disk/bytes_used
             # and disk/percent_used to avoid statfs() noise on host mount
             # points the container can't see (e.g. /boot/efi).
@@ -65,13 +72,17 @@ spec:
             # Our cf1z-aware health probes (replace upstream's broken
             # crictl/systemctl-dependent ones).
             - --config.custom-plugin-monitor=/etc/cf1z/configs/check-kubelet.json,/etc/cf1z/configs/check-containerd.json
-            # Ports shifted off upstream's 20256/20257 because hostNetwork=true
-            # exposes them on the host; the helm NPD's pod-network 20257 is
-            # unrelated, but we leave clear separation.
+            # Ports on hostNetwork. We keep 20266/20267 (offset from upstream's
+            # 20256/20257) for clear separation from anything pre-consolidation
+            # that might still scrape the legacy ports.
             - --address=0.0.0.0
             - --port=20266
             - --prometheus-address=0.0.0.0
             - --prometheus-port=20267
+            # Force a NodeCondition heartbeat at least every 5 min, matching
+            # the helm NPD's prior cadence so downstream watchers (Spec 001
+            # controller, Spec 002 emitter) see fresh transitionTimes.
+            - --k8s-exporter-heartbeat-period=5m0s
           env:
             - name: NODE_NAME
               valueFrom:
@@ -152,9 +163,11 @@ spec:
         # Two volume mounts off the same ConfigMap to set different modes.
         - name: medic-configs
           configMap:
-            name: node-medic-agent-cf1z
+            name: hack-node-problem-detector
             defaultMode: 0644
             items:
+              - key: cf-kernel-monitor.json
+                path: cf-kernel-monitor.json
               - key: check-kubelet.json
                 path: check-kubelet.json
               - key: check-containerd.json
@@ -163,7 +176,7 @@ spec:
                 path: system-stats-monitor.json
         - name: medic-probes
           configMap:
-            name: node-medic-agent-cf1z
+            name: hack-node-problem-detector
             defaultMode: 0755
             items:
               - key: check-kubelet-healthz.sh

@@ -1,10 +1,10 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: node-medic-agent
+  name: hack-node-problem-detector
   namespace: cf-monitoring
   labels:
-    app.kubernetes.io/name: node-medic-agent
+    app.kubernetes.io/name: hack-node-problem-detector
     app.kubernetes.io/managed-by: hackathon-2026
 ---
 # Bind to the cluster-built-in `system:node-problem-detector` ClusterRole
@@ -13,9 +13,9 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: node-medic-agent
+  name: hack-node-problem-detector
   labels:
-    app.kubernetes.io/name: node-medic-agent
+    app.kubernetes.io/name: hack-node-problem-detector
     app.kubernetes.io/managed-by: hackathon-2026
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -23,5 +23,5 @@ roleRef:
   name: system:node-problem-detector
 subjects:
   - kind: ServiceAccount
-    name: node-medic-agent
+    name: hack-node-problem-detector
     namespace: cf-monitoring
