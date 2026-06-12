@@ -1,0 +1,136 @@
+# node-medic-agent configs and probes.
+#
+# Two logical groups in one ConfigMap (with per-item modes so probes get +x):
+#   1. Custom-plugin-monitor JSON configs that wire up our probes to NPD's
+#      condition-emission machinery.
+#   2. Bash probe scripts invoked by those configs. We ship the scripts here
+#      rather than building a custom NPD image so iteration is fast.
+#
+# Replaces the original `*-overrides` ConfigMap that wrapped the upstream
+# health-checker (which depended on crictl/systemctl, neither in the image).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-medic-agent-cf1z
+  namespace: cf-monitoring
+  labels:
+    app.kubernetes.io/name: node-medic-agent
+    app.kubernetes.io/managed-by: hackathon-2026
+data:
+  # ---- custom-plugin-monitor configs (mode 0644 via defaultMode) ----
+
+  check-kubelet.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "30s",
+        "timeout": "5s",
+        "max_output_length": 200,
+        "concurrency": 1
+      },
+      "source": "node-medic-agent-kubelet",
+      "metricsReporting": true,
+      "conditions": [
+        {
+          "type": "KubeletUnhealthy",
+          "reason": "KubeletIsHealthy",
+          "message": "kubelet healthz endpoint is reachable"
+        }
+      ],
+      "rules": [
+        {
+          "type": "permanent",
+          "condition": "KubeletUnhealthy",
+          "reason": "KubeletHealthzFailed",
+          "path": "/etc/cf1z/probes/check-kubelet-healthz.sh",
+          "timeout": "5s"
+        }
+      ]
+    }
+
+  check-containerd.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "30s",
+        "timeout": "5s",
+        "max_output_length": 200,
+        "concurrency": 1
+      },
+      "source": "node-medic-agent-containerd",
+      "metricsReporting": true,
+      "conditions": [
+        {
+          "type": "ContainerRuntimeUnhealthy",
+          "reason": "ContainerRuntimeIsHealthy",
+          "message": "containerd socket present and process alive"
+        }
+      ],
+      "rules": [
+        {
+          "type": "permanent",
+          "condition": "ContainerRuntimeUnhealthy",
+          "reason": "ContainerdUnreachable",
+          "path": "/etc/cf1z/probes/check-containerd.sh",
+          "timeout": "5s"
+        }
+      ]
+    }
+
+  # ---- probe scripts (need execute bit; set per-item below in DaemonSet volume) ----
+
+  check-kubelet-healthz.sh: |
+    #!/usr/bin/env bash
+    # See deployment/cf1z/probes/check-kubelet-healthz.sh in the repo for
+    # the canonical source. Keep these in sync.
+    set -uo pipefail
+    HOST=${KUBELET_HEALTHZ_HOST:-127.0.0.1}
+    PORT=${KUBELET_HEALTHZ_PORT:-10248}
+    URI=${KUBELET_HEALTHZ_PATH:-/healthz}
+    TIMEOUT_SECS=${KUBELET_HEALTHZ_TIMEOUT:-3}
+    if ! exec 3<>/dev/tcp/${HOST}/${PORT} 2>/dev/null; then
+      echo "ERROR connect kubelet ${HOST}:${PORT}: refused or unreachable"
+      exit 1
+    fi
+    printf 'GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n' "$URI" "$HOST" >&3
+    if ! read -r -t "$TIMEOUT_SECS" STATUS <&3; then
+      exec 3>&- 2>/dev/null
+      echo "ERROR kubelet ${HOST}:${PORT}${URI}: read timeout (${TIMEOUT_SECS}s)"
+      exit 1
+    fi
+    exec 3>&- 2>/dev/null
+    if [[ "$STATUS" == HTTP/*\ 200* ]]; then
+      echo "kubelet healthz OK"
+      exit 0
+    fi
+    STATUS=${STATUS%$'\r'}
+    echo "ERROR kubelet ${HOST}:${PORT}${URI}: ${STATUS:-<no response>}"
+    exit 1
+
+  check-containerd.sh: |
+    #!/usr/bin/env bash
+    # See deployment/cf1z/probes/check-containerd.sh in the repo for the
+    # canonical source. Keep these in sync.
+    set -uo pipefail
+    SOCK=${CONTAINERD_SOCK:-/host/run/containerd/containerd.sock}
+    PROC=${CONTAINERD_PROC:-/host/proc}
+    COMM_NAME=${CONTAINERD_COMM:-containerd}
+    if [ ! -S "$SOCK" ]; then
+      echo "ERROR containerd socket missing or not a socket: $SOCK"
+      exit 1
+    fi
+    PID_FOUND=
+    for d in "$PROC"/[0-9]*; do
+      [ -r "$d/comm" ] || continue
+      read -r comm <"$d/comm" 2>/dev/null || continue
+      if [ "$comm" = "$COMM_NAME" ]; then
+        PID_FOUND=${d##*/}
+        break
+      fi
+    done
+    if [ -z "$PID_FOUND" ]; then
+      echo "ERROR no process named '$COMM_NAME' in host PID namespace"
+      exit 1
+    fi
+    echo "containerd OK (pid $PID_FOUND, sock $SOCK)"
+    exit 0

@@ -1,0 +1,25 @@
+# Headless service so a Prometheus scrape job (or `kubectl port-forward`)
+# can reach each pod's :20267 metrics endpoint by pod DNS. Pods run with
+# hostNetwork=true, so 20266/20267 are also bound to the host directly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-medic-agent
+  namespace: cf-monitoring
+  labels:
+    app.kubernetes.io/name: node-medic-agent
+    app.kubernetes.io/managed-by: hackathon-2026
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: node-medic-agent
+    app.kubernetes.io/component: detector
+  ports:
+    - name: prom
+      port: 20267
+      targetPort: prom
+      protocol: TCP
+    - name: http
+      port: 20266
+      targetPort: http
+      protocol: TCP
