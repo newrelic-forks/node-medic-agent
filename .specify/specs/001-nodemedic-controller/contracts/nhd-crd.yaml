@@ -1,0 +1,217 @@
+# NodeHealthDiagnosisAI CRD — frozen v1alpha1 schema vendored for Scope 2.
+#
+# Authority: Scope 3 (per Constitution Article II.2). This file is a snapshot
+# vendored into Scope 2's repo so the controller's tests can validate against
+# the same schema the agent emits. If Scope 3 changes the schema, both repos
+# update in the same coordinated PR — see plan.md research R-2.
+#
+# Source: docs/cf/nodemedic-scope.md §2.2 (June 2026 baseline).
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nodehealthdiagnosisais.nodemedic.cf.newrelic.com
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  group: nodemedic.cf.newrelic.com
+  scope: Namespaced
+  names:
+    plural: nodehealthdiagnosisais
+    singular: nodehealthdiagnosisai
+    kind: NodeHealthDiagnosisAI
+    shortNames:
+      - nhd
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Node
+          type: string
+          jsonPath: .spec.case.nodeName
+        - name: Provider
+          type: string
+          jsonPath: .spec.case.provider
+        - name: Confidence
+          type: number
+          jsonPath: .status.diagnosis.confidence
+        - name: Decision
+          type: string
+          jsonPath: .status.action.decision
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [case, budgets]
+              properties:
+                case:
+                  type: object
+                  required: [caseId, nodeName, clusterName, provider, region, instanceId, trigger]
+                  properties:
+                    caseId:
+                      type: string
+                      pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+                    nodeName:
+                      type: string
+                      maxLength: 253
+                    clusterName:
+                      type: string
+                      minLength: 1
+                    provider:
+                      type: string
+                      enum: [aws, azure]
+                    region:
+                      type: string
+                      minLength: 1
+                    instanceId:
+                      type: string
+                      minLength: 1
+                    trigger:
+                      type: object
+                      required: [type, observedAt]
+                      properties:
+                        type:
+                          type: string
+                          minLength: 1
+                        reason:
+                          type: string
+                        message:
+                          type: string
+                          maxLength: 256
+                        observedAt:
+                          type: string
+                          format: date-time
+                budgets:
+                  type: object
+                  properties:
+                    maxTurns:
+                      type: integer
+                      minimum: 1
+                      default: 15
+                    maxBudgetUSD:
+                      type: string
+                      pattern: '^[0-9]+\.[0-9]{2}$'
+                      default: "0.50"
+                    deadline:
+                      type: string
+                      format: date-time
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Diagnosing, Diagnosed, Evaluating, Evaluated, Acted, Failed]
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime, reason]
+                    properties:
+                      type:
+                        type: string
+                        enum: [AgentInvoked, ReportReady, EvalApproved, ActionApplied, Notified]
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                diagnosis:
+                  type: object
+                  properties:
+                    rootCause:
+                      type: string
+                    rcaCategory:
+                      type: string
+                      enum: [Conntrack, FD, PID, Inode, Disk, DNS, IMDS, Kernel, Kubelet, Unknown]
+                    confidence:
+                      type: number
+                      minimum: 0.0
+                      maximum: 1.0
+                    evidence:
+                      type: array
+                      items:
+                        type: object
+                        required: [source]
+                        properties:
+                          source:
+                            type: string
+                            enum: [nrql, ssh, kubectl, cloud, proc, log]
+                          ref:
+                            type: string
+                          result:
+                            type: string
+                            maxLength: 4096
+                          observedAt:
+                            type: string
+                            format: date-time
+                    recommendation:
+                      type: object
+                      properties:
+                        action:
+                          type: string
+                          enum: [Cordon, DrainAndCordon, NoAction]
+                        reason:
+                          type: string
+                    auditLogRef:
+                      type: object
+                      properties:
+                        objectStore:
+                          type: string
+                    modelUsed:
+                      type: string
+                    turnsUsed:
+                      type: integer
+                    costUSD:
+                      type: string
+                    completedAt:
+                      type: string
+                      format: date-time
+                evaluation:
+                  type: object
+                  description: "POST-HACKATHON; not written or read in v1."
+                  properties:
+                    agreesWithDiagnosis:
+                      type: boolean
+                    confidence:
+                      type: number
+                    notes:
+                      type: string
+                    completedAt:
+                      type: string
+                action:
+                  type: object
+                  properties:
+                    decision:
+                      type: string
+                      enum: [Applied, Skipped, HumanInLoop]
+                    operation:
+                      type: string
+                      enum: [cordon, noop]
+                    appliedAt:
+                      type: string
+                      format: date-time
+                    notifications:
+                      type: object
+                      properties:
+                        slack:
+                          type: object
+                          properties:
+                            channel: { type: string }
+                            ts:      { type: string }
+                            permalink: { type: string }

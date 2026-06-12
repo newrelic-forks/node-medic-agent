@@ -1,0 +1,47 @@
+# Dockerfile for the NodeMedic controller (Scope 2 of AFA 2026 hackathon).
+#
+# Builds the cmd/nodemedic-controller binary as a static, multi-arch image on
+# distroless. NPD's existing Dockerfile is unchanged. Build with:
+#
+#   docker buildx build \
+#     -f Dockerfile.nodemedic-controller \
+#     --platform linux/amd64,linux/arm64 \
+#     -t ghcr.io/cf/nodemedic-controller:dev \
+#     .
+#
+# Or via the Makefile: `make nodemedic-docker-build IMG=...`.
+#
+# "builder-base" can be overridden via `docker buildx --build-context
+# builder-base=docker-image://golang:<other>@sha256:<digest>` for testing
+# alternate Go toolchains, mirroring the pattern in the NPD Dockerfile.
+FROM golang:1.25.9-bookworm@sha256:298734aec230b5f3e8cee450ce6d7eccc39f1797ba548ee90d57e9803030c6c3 AS builder-base
+FROM --platform=$BUILDPLATFORM builder-base AS builder
+
+ARG TARGETARCH
+ARG TARGETOS=linux
+
+ENV GOPATH=/gopath/
+ENV PATH=$GOPATH/bin:$PATH
+ENV CGO_ENABLED=0
+RUN go version
+
+COPY . /src/
+WORKDIR /src
+
+# Build a fully-static binary; no libsystemd, no glibc dependency. The
+# `-trimpath` and `-buildvcs=false` flags keep the output reproducible and
+# avoid leaking workspace paths into the binary.
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -buildvcs=false \
+      -ldflags="-s -w" \
+      -o /out/nodemedic-controller \
+      ./cmd/nodemedic-controller
+
+# Distroless static — no shell, no package manager, only ca-certificates and
+# /etc/passwd for the nonroot user. Aligns with controller-runtime conventions.
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+
+COPY --from=builder /out/nodemedic-controller /usr/local/bin/nodemedic-controller
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/nodemedic-controller"]
