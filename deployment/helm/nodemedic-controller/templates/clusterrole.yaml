@@ -1,0 +1,24 @@
+{{- $_ := include "nodemedic.requireTestCluster" . -}}
+{{/*
+RBAC for the controller — STRICTLY limited per spec NFR-4 and Constitution
+Articles I.1 + I.2. Mirrors config/nodemedic/rbac/role.yaml. Any change
+here MUST also land in that file.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "nodemedic.fullname" . }}
+  labels: {{- include "nodemedic.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["nodemedic.cf.newrelic.com"]
+    resources: ["nodehealthdiagnosisais"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["nodemedic.cf.newrelic.com"]
+    resources: ["nodehealthdiagnosisais/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]

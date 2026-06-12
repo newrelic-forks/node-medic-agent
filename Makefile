@@ -421,14 +421,26 @@ nodemedic-generate:
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./api/..."
 
 .PHONY: nodemedic-manifests
+# `crd:allowDangerousTypes=true` is required because the contract schema
+# (.specify/specs/001-nodemedic-controller/contracts/nhd-crd.yaml) uses
+# `type: number` for status.diagnosis.confidence — controller-gen flags
+# float64 fields as "dangerous" by default. The contract is the authority
+# (Constitution Article II.2), so we opt in to numeric encoding.
+#
+# After generation we copy the CRD into the Helm chart's files/crd/ dir
+# so `helm install` ships the same byte-for-byte CRD that controller-gen
+# produced.
 nodemedic-manifests:
 	$(CONTROLLER_GEN) \
-	  crd \
+	  crd:allowDangerousTypes=true \
 	  rbac:roleName=nodemedic-controller \
 	  paths="./api/..." \
 	  paths="./internal/nodemedic/..." \
 	  output:crd:artifacts:config=config/nodemedic/crd \
 	  output:rbac:artifacts:config=config/nodemedic/rbac
+	@mkdir -p $(NODEMEDIC_HELM_DIR)/files/crd
+	@cp config/nodemedic/crd/*.yaml $(NODEMEDIC_HELM_DIR)/files/crd/
+	@echo "synced CRD into $(NODEMEDIC_HELM_DIR)/files/crd/"
 
 .PHONY: nodemedic-test
 nodemedic-test:

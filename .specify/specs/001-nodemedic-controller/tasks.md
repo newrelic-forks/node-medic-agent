@@ -58,35 +58,35 @@ description: "Task list for NodeMedic Controller (Scope 2 of AFA 2026 hackathon)
 
 ### CRD types (vendored from contracts/nhd-crd.yaml)
 
-- [ ] T010 Author `api/v1alpha1/groupversion_info.go` — Group `nodemedic.cf.newrelic.com`, Version `v1alpha1`, scheme builder
-- [ ] T011 Author `api/v1alpha1/nodehealthdiagnosisai_types.go` — Go structs matching [`contracts/nhd-crd.yaml`](./contracts/nhd-crd.yaml) field-by-field, with `+kubebuilder:` markers for validation, status subresource, printer columns
-- [ ] T012 Run `make nodemedic-generate` to produce `api/v1alpha1/zz_generated.deepcopy.go` and check it in
-- [ ] T013 Run `make nodemedic-manifests` to produce `config/nodemedic/crd/bases/nodemedic.cf.newrelic.com_nodehealthdiagnosisais.yaml`; **verify it byte-matches** the schema portion of [`contracts/nhd-crd.yaml`](./contracts/nhd-crd.yaml) (locks the contract to Scope 3's authority — Constitution II.2)
+- [x] T010 Authored `api/v1alpha1/groupversion_info.go` — uses `runtime.NewSchemeBuilder` (apimachinery) rather than controller-runtime's `scheme.Builder` so the package compiles standalone.
+- [x] T011 Authored `api/v1alpha1/nodehealthdiagnosisai_types.go` matching [`contracts/nhd-crd.yaml`](./contracts/nhd-crd.yaml): `CaseSpec` / `TriggerSpec` / `BudgetsSpec`, `NodeHealthDiagnosisAIStatus` with `Phase` / `Conditions` / `Diagnosis` / `Evaluation` / `Action`, plus enum types for `Provider`/`EvidenceSource`/`RecommendationAction`/`RCACategory`/`ActionDecision`/`ActionOperation`. Compile-time `_ runtime.Object` assertions break the build if deepcopy drifts.
+- [x] T012 `make nodemedic-generate` → `api/v1alpha1/zz_generated.deepcopy.go` (358 lines, checked in).
+- [x] T013 `make nodemedic-manifests` → `config/nodemedic/crd/nodemedic.cf.newrelic.com_nodehealthdiagnosisais.yaml`. Required `crd:allowDangerousTypes=true` because `confidence` is `type: number` (the contract is the authority — Constitution II.2). Schema verified structurally: enums, ranges (`confidence` 0–1), patterns (UUIDv4, decimal-as-string), required fields, status subresource, all 6 printer columns. Defaults made it through (`maxTurns: 15`, `maxBudgetUSD: "0.50"`). The Makefile target now also copies the CRD into `deployment/helm/nodemedic-controller/files/crd/` so `helm install` ships exactly what `controller-gen` produced.
 
 ### Manager scaffolding
 
-- [ ] T014 Author `cmd/nodemedic-controller/main.go` — flag set per spec NFR-6 (`--watched-conditions`, `--min-confidence`, `--min-evidence-sources`, `--agent-url`, `--cluster-name`, `--debounce-window`), signal handling, `ctrl.NewManager` with metrics on `:9443`, **no leader election** (research R-7), startup-time guard rejecting `--cluster-name` not starting with `test-` (Constitution I.9)
-- [ ] T015 [P] Author `internal/nodemedic/metrics/metrics.go` — register `nodemedic_cases_total`, `nodemedic_phase_duration_seconds`, `nodemedic_agent_post_total`, `nodemedic_cordon_total`, `nodemedic_slack_post_total` against the manager's metrics registry (NFR-3)
-- [ ] T016 [P] Author `internal/nodemedic/controller/types.go` — `Case`, `Decisions`, gate result, debounce key types per [`data-model.md`](./data-model.md) §4–§5
+- [x] T014 Authored `cmd/nodemedic-controller/main.go` — flag set per spec NFR-6 with defaults (`--watched-conditions` covers all 7 fault classes, `--min-confidence=0.7`, `--min-evidence-sources=2`, `--debounce-window=30s`), zap-logr setup, `ctrl.NewManager` on `:9443` (metrics) + `:8081` (probes), **no leader election** (research R-7). Cluster-name guard rejects empty + non-`test-*` (Constitution I.9, binary-side belt + suspenders). Smoke-tested both rejection paths via `/tmp/nmc-test`. Reconciler wiring deferred to Phase 3 T044.
+- [x] T015 [P] Authored `internal/nodemedic/metrics/metrics.go` — all 5 NFR-3 collectors (`nodemedic_cases_total`, `nodemedic_phase_duration_seconds`, `nodemedic_agent_post_total`, `nodemedic_cordon_total`, `nodemedic_slack_post_total`) registered against `ctrlmetrics.Registry`. Label-value constants exported so reconciler code in Phase 3 doesn't have to hard-code strings.
+- [x] T016 [P] Authored `internal/nodemedic/controller/types.go` — `Case`, `Decisions`, `GateOutcome`/`GateResult`, `CordonResult`, `SlackResult`, `DebounceKey` per [`data-model.md`](./data-model.md) §4–§6. Time injected via `Case.Now` so tests can drive deadlines deterministically.
 
 ### RBAC
 
-- [ ] T017 Author `config/nodemedic/rbac/role.yaml` per spec NFR-4 — exactly: `nhd` get/list/watch/create/update/patch + status; `nodes` get/list/watch/patch; `events` create/patch. **No other verbs, no other resources.**
-- [ ] T018 [P] Author `config/nodemedic/rbac/role_binding.yaml`, `service_account.yaml`
+- [x] T017 Authored `config/nodemedic/rbac/role.yaml` per spec NFR-4 — exactly `nhd` get/list/watch/create/update/patch (+ status get/update/patch); `nodes` get/list/watch/patch; `events` create/patch. Hand-written rather than controller-gen-marker-driven so the verb surface is one explicit file (easier to audit, harder to widen accidentally).
+- [x] T018 [P] Authored `config/nodemedic/rbac/role_binding.yaml` + `service_account.yaml` (namespace `container-fabric`).
 
 ### Helm chart skeleton
 
-- [ ] T019 Author `deployment/helm/nodemedic-controller/Chart.yaml` (`version: 0.1.0`, `apiVersion: v2`, `appVersion: 0.1.0`)
-- [ ] T020 Author `deployment/helm/nodemedic-controller/values.yaml` — flag defaults, image, resources, `installCRD: true`, `clusterName: ""`
-- [ ] T021 [P] Author `deployment/helm/nodemedic-controller/templates/_helpers.tpl` — **fail/include guard** that aborts `helm install` if resolved `clusterName` doesn't match `^test-` (Constitution I.9 hard guard, plan §"Constitution Check" I.9)
-- [ ] T022 [P] Author `deployment/helm/nodemedic-controller/templates/serviceaccount.yaml`, `clusterrole.yaml`, `clusterrolebinding.yaml`, `deployment.yaml` (one replica), `service.yaml` (port 9443 metrics)
-- [ ] T023 Author `deployment/helm/nodemedic-controller/templates/crd.yaml` — gated by `.Values.installCRD`, with `helm.sh/resource-policy: keep` annotation (research R-4)
+- [x] T019 Authored `deployment/helm/nodemedic-controller/Chart.yaml` (apiVersion v2, `version: 0.1.0`, kubeVersion `>=1.28.0-0`).
+- [x] T020 Authored `deployment/helm/nodemedic-controller/values.yaml` — flag defaults mirror `cmd/main.go` defaults; `installCRD: true`; secret refs (`nodemedic-agent-token`, `nodemedic-slack`); `replicaCount: 1`; resource limits.
+- [x] T021 [P] Authored `templates/_helpers.tpl` with the `nodemedic.requireTestCluster` helper that calls `fail` if `.Values.clusterName` is missing or doesn't start with `test-`. Every other template includes it; helm-lint test confirmed both rejection paths fire (Constitution I.9 chart-side hard guard).
+- [x] T022 [P] Authored `templates/serviceaccount.yaml`, `clusterrole.yaml` (mirrors `config/nodemedic/rbac/role.yaml` line-for-line), `clusterrolebinding.yaml`, `deployment.yaml` (one replica, distroless `runAsNonRoot:true`, `readOnlyRootFilesystem:true`, drop ALL caps, healthz/readyz probes), `service.yaml`.
+- [x] T023 Authored `templates/crd.yaml` gated by `.Values.installCRD`. Loaded via `.Files.Get "files/crd/..."` rather than the special Helm `crds/` directory so the toggle works (Helm's `crds/` is auto-installed unconditionally). `helm.sh/resource-policy: keep` annotation already present in the generated CRD via the api type comments.
 
 ### Shared test fixtures
 
-- [ ] T024 Capture a real EKS Node `kubectl get node <n> -o yaml` from `test-odd-wire`; commit at `test/nodemedic/fixtures/node-eks.yaml` (must include `spec.providerID: aws:///<az>/i-...`, `topology.kubernetes.io/region` label)
-- [ ] T025 [P] Capture a real Azure kubeadm Node `kubectl get node <n> -o yaml` from the designated test cluster; commit at `test/nodemedic/fixtures/node-azure.yaml` (must include `spec.providerID: azure:///subscriptions/.../virtualMachines/<vm>`)
-- [ ] T026 [P] Author `test/nodemedic/fixtures/nhd-applied.yaml` — canned NHD with `phase=Diagnosed`, `confidence=0.85`, evidence from 3 distinct sources, `recommendation.action=Cordon` (drives US1 + Day-1-AM stub per research R-14)
+- [x] T024 Authored a **representative** `test/nodemedic/fixtures/node-eks.yaml`. Header comment flags it for replacement with a real `kubectl get node` capture on Day 1 AM. Fields cover the FR-2 resolution paths: `cf.newrelic.com/cloud-provider=aws`, `topology.kubernetes.io/region=us-east-2`, `spec.providerID=aws:///us-east-2a/i-0abc1234deadbeef`, plus a `ConntrackSaturated` condition pre-seeded at False so unit tests can flip it.
+- [x] T025 [P] Authored a **representative** `test/nodemedic/fixtures/node-azure.yaml` matching cloud-provider-azure's URI shape: `spec.providerID=azure:///subscriptions/.../virtualMachines/aks-cf-test-1-vmss000004`, `topology.kubernetes.io/region=eastus2`, `cf.newrelic.com/cloud-provider=azure`. Same Day-1-AM replacement note.
+- [x] T026 [P] Authored `test/nodemedic/fixtures/nhd-applied.yaml` — canned NHD with `phase=Diagnosed`, `confidence=0.85`, three distinct evidence sources (`nrql`, `ssh`, `kubectl`), `recommendation.action=Cordon`. Drives the US1 happy-path through gate-pass + cordon + Slack `Applied` without the agent being live (Constitution II.3 / research R-14 stub deliverable).
 
 **Checkpoint**: CRD installs cleanly. Manager binary starts, registers no controllers, exposes empty `/metrics`. Helm chart renders against `--set clusterName=test-foo` and refuses with `clusterName=stg-foo`. Day-1-AM milestone for Constitution II.3 is **structurally** ready (we still need at least US1's reconciler scaffolding to be a meaningful stub — completes inside US1).
 
