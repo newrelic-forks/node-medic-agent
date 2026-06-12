@@ -42,7 +42,10 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	nodemedicv1alpha1 "k8s.io/node-problem-detector/api/v1alpha1"
+	"k8s.io/node-problem-detector/internal/nodemedic/agentclient"
+	"k8s.io/node-problem-detector/internal/nodemedic/controller"
 	"k8s.io/node-problem-detector/internal/nodemedic/metrics"
+	"k8s.io/node-problem-detector/internal/nodemedic/notifier"
 )
 
 // scheme holds the registered API types for this manager. Built once at
@@ -61,6 +64,7 @@ type options struct {
 	minEvidenceSources int
 	agentURL           string
 	clusterName        string
+	namespace          string
 	debounceWindow     time.Duration
 	metricsAddr        string
 	probeAddr          string
@@ -128,10 +132,52 @@ func run() error {
 		return fmt.Errorf("add readyz: %w", err)
 	}
 
-	// Phase 3 (T044) wires the reconciler + node watcher here.
-	// For Phase 2, the manager runs with no controllers — it serves
-	// /metrics, /healthz, /readyz and exits cleanly on SIGTERM.
-	klog.Info("manager ready; reconcilers wire in Phase 3 (US1)")
+	// Wire the NHD reconciler + node watcher (Phase 3 / US1).
+	// Build the agent + Slack clients first so we can panic-fast at
+	// startup if a Secret-mounted env var is missing rather than
+	// discover it mid-reconcile.
+	agentToken := os.Getenv("NODEMEDIC_AGENT_TOKEN")
+	if agentToken == "" {
+		klog.Info("WARNING: NODEMEDIC_AGENT_TOKEN env is empty; agent calls will likely 401")
+	}
+	slackWebhook := os.Getenv("NODEMEDIC_SLACK_WEBHOOK_URL")
+	if slackWebhook == "" {
+		klog.Info("WARNING: NODEMEDIC_SLACK_WEBHOOK_URL env is empty; Slack posts will fail")
+	}
+
+	agentCli := agentclient.New(opts.agentURL, agentToken)
+	slackCli := notifier.NewSlack(slackWebhook)
+
+	nhdRec := &controller.NHDReconciler{
+		Client:             mgr.GetClient(),
+		Recorder:           mgr.GetEventRecorderFor("nodemedic-controller"),
+		Agent:              agentCli,
+		Slack:              slackCli,
+		MinConfidence:      opts.minConfidence,
+		MinEvidenceSources: opts.minEvidenceSources,
+		ClusterName:        opts.clusterName,
+		Namespace:          opts.namespace,
+	}
+	if err := nhdRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup NHD reconciler: %w", err)
+	}
+
+	nodeWatcher := &controller.NodeWatcher{
+		Client:            mgr.GetClient(),
+		Recorder:          mgr.GetEventRecorderFor("nodemedic-controller"),
+		WatchedConditions: parseWatchedConditions(opts.watchedConditions),
+		Debounce:          controller.NewDebounceMap(opts.debounceWindow),
+		ClusterName:       opts.clusterName,
+		Namespace:         opts.namespace,
+		MaxTurns:          15,
+		MaxBudgetUSD:      "0.50",
+		DeadlineWindow:    60 * time.Second,
+	}
+	if err := nodeWatcher.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup node watcher: %w", err)
+	}
+
+	klog.Info("controllers wired", "watchedConditions", opts.watchedConditions)
 
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		return fmt.Errorf("manager exited with error: %w", err)
@@ -162,7 +208,10 @@ func parseFlags() options {
 		"agent service URL receiving POST /diagnose")
 
 	fs.StringVar(&opts.clusterName, "cluster-name", "",
-		"cluster name (required; MUST start with `test-`)")
+		"cluster name (required; MUST be `cf1z` or start with `test-`)")
+
+	fs.StringVar(&opts.namespace, "namespace", "cf-monitoring",
+		"namespace where NodeHealthDiagnosisAI CRs are created")
 
 	fs.DurationVar(&opts.debounceWindow, "debounce-window", 30*time.Second,
 		"per (node, condition) debounce window for trigger detection")
@@ -178,6 +227,20 @@ func parseFlags() options {
 		os.Exit(2)
 	}
 	return opts
+}
+
+// parseWatchedConditions splits the comma-separated --watched-conditions
+// flag into a normalized slice (trimmed, empty entries dropped).
+func parseWatchedConditions(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // validateClusterName enforces Constitution Article I.9 at the binary
