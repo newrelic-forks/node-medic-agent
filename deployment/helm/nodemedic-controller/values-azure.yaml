@@ -30,4 +30,4 @@ image:
   # account credentials we don't have at the laptop. Migrate to
   # cf-registry once a CI push pipeline is in place.
   repository: docker.io/shahrelic/hack-2026-nodemedic
-  tag: "dev-cf1z-3ac1550a"
+  tag: "dev-cf1z-47fc8b0d"
