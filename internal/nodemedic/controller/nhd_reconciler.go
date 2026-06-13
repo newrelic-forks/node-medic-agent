@@ -253,6 +253,19 @@ func (r *NHDReconciler) applyPath(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	// Cache-lag re-entry guard: if a previous reconcile of this same
+	// NHD already recorded the Applied decision, skip the whole path
+	// (cordon is idempotent, but Slack.Post is NOT — we'd double-post
+	// the operator's channel). The optimistic-lock on the final
+	// status patch is the second line of defense if two reconciles
+	// race past this guard concurrently.
+	if nhd.Status.Action != nil &&
+		nhd.Status.Action.Decision == nodemedicv1alpha1.ActionDecisionApplied {
+		logger.V(1).Info("applyPath: action.decision=Applied already recorded; skipping",
+			"appliedAt", nhd.Status.Action.AppliedAt)
+		return ctrl.Result{}, nil
+	}
+
 	// 1. Cordon.
 	var node corev1.Node
 	if err := r.Get(ctx, client.ObjectKey{Name: nhd.Spec.Case.NodeName}, &node); err != nil {
@@ -272,31 +285,11 @@ func (r *NHDReconciler) applyPath(
 	metrics.CordonTotal.WithLabelValues(metrics.CordonOK).Inc()
 	logger.Info("cordon ok", "node", node.Name, "patched", cr.Patched)
 
-	// 2. Slack.
+	// 2. Claim Applied via optimistic-locked status patch BEFORE the
+	// Slack post. The cordon above is idempotent (multiple reconciles
+	// safe), but Slack.Post is not — only the reconcile that wins
+	// the optimistic lock is allowed to notify.
 	now := r.now()
-	payload, err := notifier.BuildApplied(notifier.AppliedInput{
-		NodeName:    nhd.Spec.Case.NodeName,
-		ClusterName: nhd.Spec.Case.ClusterName,
-		Namespace:   nhd.Namespace,
-		NHDName:     nhd.Name,
-		Diagnosis:   nhd.Status.Diagnosis,
-	})
-	if err != nil {
-		// Don't roll back the cordon — Slack is best-effort.
-		r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "NotifierFailed",
-			"BuildApplied: %v", err)
-	} else {
-		res := r.Slack.Post(ctx, payload)
-		if res.Posted {
-			metrics.SlackPostTotal.WithLabelValues(metrics.SlackKindApplied, metrics.SlackResultOK).Inc()
-		} else {
-			metrics.SlackPostTotal.WithLabelValues(metrics.SlackKindApplied, metrics.SlackResultErr).Inc()
-			r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "NotifierFailed",
-				"slack post failed after %d attempts: %v", res.Attempts, res.LastErr)
-		}
-	}
-
-	// 3. Status update — record action + transition to Acted.
 	patchBase := nhd.DeepCopy()
 	nhd.Status.Action = &nodemedicv1alpha1.ActionStatus{
 		Decision:  nodemedicv1alpha1.ActionDecisionApplied,
@@ -311,9 +304,38 @@ func (r *NHDReconciler) applyPath(
 		LastTransitionTime: metav1.NewTime(now),
 	})
 	nhd.Status.Phase = nodemedicv1alpha1.PhaseActed
-	if err := r.Status().Patch(ctx, nhd, client.MergeFrom(patchBase)); err != nil {
+	if err := r.Status().Patch(ctx, nhd, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			// Another reconcile claimed this; it will (or already did)
+			// post Slack. Bail without notifying.
+			logger.V(1).Info("applyPath: status patch lost optimistic lock; another reconcile claimed Applied")
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("status patch: %w", err)
 	}
+
+	// 3. Slack (winner only).
+	payload, err := notifier.BuildApplied(notifier.AppliedInput{
+		NodeName:    nhd.Spec.Case.NodeName,
+		ClusterName: nhd.Spec.Case.ClusterName,
+		Namespace:   nhd.Namespace,
+		NHDName:     nhd.Name,
+		Diagnosis:   nhd.Status.Diagnosis,
+	})
+	if err != nil {
+		r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "NotifierFailed",
+			"BuildApplied: %v", err)
+	} else {
+		res := r.Slack.Post(ctx, payload)
+		if res.Posted {
+			metrics.SlackPostTotal.WithLabelValues(metrics.SlackKindApplied, metrics.SlackResultOK).Inc()
+		} else {
+			metrics.SlackPostTotal.WithLabelValues(metrics.SlackKindApplied, metrics.SlackResultErr).Inc()
+			r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "NotifierFailed",
+				"slack post failed after %d attempts: %v", res.Attempts, res.LastErr)
+		}
+	}
+
 	metrics.CasesTotal.WithLabelValues(metrics.OutcomeApplied).Inc()
 	r.Recorder.Eventf(nhd, corev1.EventTypeNormal, "PhaseTransition",
 		"%s -> Acted (Applied)", nodemedicv1alpha1.PhaseDiagnosed)
@@ -327,10 +349,44 @@ func (r *NHDReconciler) humanInLoopPath(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Slack first, then status. If Slack fails we still record the
-	// HumanInLoop decision so the operator sees the case in
-	// `kubectl get nhd`; the NotifierFailed Event is the secondary
-	// signal that the side-channel notification didn't land.
+	// Cache-lag re-entry guard, mirrors applyPath. Two reconciles
+	// racing past the cache update would otherwise double-post Slack.
+	if nhd.Status.Action != nil &&
+		nhd.Status.Action.Decision == nodemedicv1alpha1.ActionDecisionHumanInLoop {
+		logger.V(1).Info("humanInLoopPath: action.decision=HumanInLoop already recorded; skipping",
+			"appliedAt", nhd.Status.Action.AppliedAt)
+		return ctrl.Result{}, nil
+	}
+
+	// 1. Claim HumanInLoop via optimistic-locked status patch FIRST.
+	// Only the winner posts Slack — losing reconciles bail at the
+	// 409 Conflict check. (Original ordering posted Slack first to
+	// guarantee a page even if the patch failed; that turned out to
+	// double-post under cache lag, which is the louder failure mode.)
+	now := r.now()
+	patchBase := nhd.DeepCopy()
+	nhd.Status.Action = &nodemedicv1alpha1.ActionStatus{
+		Decision:  nodemedicv1alpha1.ActionDecisionHumanInLoop,
+		Operation: nodemedicv1alpha1.ActionOperationNoop,
+		AppliedAt: ptrTime(now),
+	}
+	setCondition(&nhd.Status.Conditions, metav1.Condition{
+		Type:               "ActionApplied",
+		Status:             metav1.ConditionTrue,
+		Reason:             "HumanInLoop",
+		Message:            gate.Reason,
+		LastTransitionTime: metav1.NewTime(now),
+	})
+	nhd.Status.Phase = nodemedicv1alpha1.PhaseActed
+	if err := r.Status().Patch(ctx, nhd, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			logger.V(1).Info("humanInLoopPath: status patch lost optimistic lock; another reconcile claimed HumanInLoop")
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("status patch: %w", err)
+	}
+
+	// 2. Slack (winner only).
 	payload, buildErr := notifier.BuildHumanInLoop(notifier.HumanInLoopInput{
 		NodeName:    nhd.Spec.Case.NodeName,
 		ClusterName: nhd.Spec.Case.ClusterName,
@@ -354,24 +410,6 @@ func (r *NHDReconciler) humanInLoopPath(
 	}
 	logger.Info("gate-fail HumanInLoop", "node", nhd.Spec.Case.NodeName, "reason", gate.Reason)
 
-	now := r.now()
-	patchBase := nhd.DeepCopy()
-	nhd.Status.Action = &nodemedicv1alpha1.ActionStatus{
-		Decision:  nodemedicv1alpha1.ActionDecisionHumanInLoop,
-		Operation: nodemedicv1alpha1.ActionOperationNoop,
-		AppliedAt: ptrTime(now),
-	}
-	setCondition(&nhd.Status.Conditions, metav1.Condition{
-		Type:               "ActionApplied",
-		Status:             metav1.ConditionTrue,
-		Reason:             "HumanInLoop",
-		Message:            gate.Reason,
-		LastTransitionTime: metav1.NewTime(now),
-	})
-	nhd.Status.Phase = nodemedicv1alpha1.PhaseActed
-	if err := r.Status().Patch(ctx, nhd, client.MergeFrom(patchBase)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("status patch: %w", err)
-	}
 	metrics.CasesTotal.WithLabelValues(metrics.OutcomeHumanInLoop).Inc()
 	r.Recorder.Eventf(nhd, corev1.EventTypeNormal, "PhaseTransition",
 		"%s -> Acted (HumanInLoop)", nodemedicv1alpha1.PhaseDiagnosed)
@@ -465,8 +503,9 @@ func (r *NHDReconciler) bumpRetryAnnotation(
 }
 
 // criticalFailure marks the NHD terminally Failed and posts a
-// Critical Slack message. Best-effort on the Slack post; status is
-// always written so the case is auditable in `kubectl get nhd`.
+// Critical Slack message. Status patch happens FIRST under optimistic
+// lock; only the winning reconcile posts Slack. Best-effort on Slack
+// itself — the status update is the auditable record either way.
 func (r *NHDReconciler) criticalFailure(
 	ctx context.Context,
 	nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI,
@@ -474,6 +513,26 @@ func (r *NHDReconciler) criticalFailure(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	// Cache-lag fast-path guard: another reconcile already terminated
+	// the case. Skip the entire path including Slack.
+	if nhd.Status.Phase == nodemedicv1alpha1.PhaseFailed {
+		logger.V(1).Info("criticalFailure: phase=Failed already recorded; skipping")
+		return ctrl.Result{}, nil
+	}
+
+	// Claim Failed via optimistic lock BEFORE the Slack post.
+	res, err := r.markFailed(ctx, nhd, reason, detail)
+	if err != nil {
+		return res, err
+	}
+	if res.Requeue {
+		// markFailed returned 409 Conflict; another reconcile claimed
+		// this. Don't post Slack — the winner will.
+		logger.V(1).Info("criticalFailure: lost optimistic lock on Failed; not posting Critical Slack")
+		return res, nil
+	}
+
+	// Winner: post Critical Slack.
 	attempts := getRetryCount(nhd) + 1 // burn-count +1 for the final
 	payload, buildErr := notifier.BuildCritical(notifier.CriticalInput{
 		NodeName:      nhd.Spec.Case.NodeName,
@@ -488,20 +547,23 @@ func (r *NHDReconciler) criticalFailure(
 		r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "NotifierFailed",
 			"BuildCritical: %v", buildErr)
 	} else {
-		res := r.Slack.Post(ctx, payload)
-		if res.Posted {
+		postRes := r.Slack.Post(ctx, payload)
+		if postRes.Posted {
 			metrics.SlackPostTotal.WithLabelValues(metrics.SlackKindCritical, metrics.SlackResultOK).Inc()
 		} else {
 			metrics.SlackPostTotal.WithLabelValues(metrics.SlackKindCritical, metrics.SlackResultErr).Inc()
 			r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "NotifierFailed",
-				"slack post (Critical) failed after %d attempts: %v", res.Attempts, res.LastErr)
+				"slack post (Critical) failed after %d attempts: %v", postRes.Attempts, postRes.LastErr)
 		}
 	}
 	logger.Error(errors.New(reason), "terminal Critical", "detail", detail)
-
-	return r.markFailed(ctx, nhd, reason, detail)
+	return res, nil
 }
 
+// markFailed transitions the NHD to terminal Failed under optimistic
+// lock. Returns Result{Requeue:true}, nil on 409 — the caller should
+// treat that as "lost the race" and skip side effects (e.g.
+// criticalFailure won't post Slack on a lost race).
 func (r *NHDReconciler) markFailed(ctx context.Context, nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI, reason, message string) (ctrl.Result, error) {
 	now := r.now()
 	patchBase := nhd.DeepCopy()
@@ -513,7 +575,7 @@ func (r *NHDReconciler) markFailed(ctx context.Context, nhd *nodemedicv1alpha1.N
 		Message:            message,
 		LastTransitionTime: metav1.NewTime(now),
 	})
-	if err := r.Status().Patch(ctx, nhd, client.MergeFrom(patchBase)); err != nil {
+	if err := r.Status().Patch(ctx, nhd, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
 		if apierrors.IsConflict(err) {
 			return ctrl.Result{Requeue: true}, nil
 		}
@@ -524,8 +586,10 @@ func (r *NHDReconciler) markFailed(ctx context.Context, nhd *nodemedicv1alpha1.N
 	return ctrl.Result{}, nil
 }
 
-// transitionPhase patches phase + appends a Condition. Idempotent if
-// the phase is already at `to`.
+// transitionPhase patches phase + appends a Condition under
+// optimistic lock. Idempotent if the phase is already at `to`. On
+// 409 Conflict the caller can treat it as "another reconcile already
+// transitioned us" and skip its follow-up work.
 func (r *NHDReconciler) transitionPhase(
 	ctx context.Context,
 	nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI,
@@ -539,7 +603,12 @@ func (r *NHDReconciler) transitionPhase(
 	nhd.Status.Phase = to
 	cond.LastTransitionTime = metav1.NewTime(r.now())
 	setCondition(&nhd.Status.Conditions, cond)
-	if err := r.Status().Patch(ctx, nhd, client.MergeFrom(patchBase)); err != nil {
+	if err := r.Status().Patch(ctx, nhd, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			// Another reconcile transitioned first. Caller's next
+			// reconcile will see the new phase via cache.
+			return nil
+		}
 		return fmt.Errorf("transition to %s: %w", to, err)
 	}
 	r.Recorder.Eventf(nhd, corev1.EventTypeNormal, "PhaseTransition", "-> %s", to)
