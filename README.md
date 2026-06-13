@@ -32,16 +32,32 @@ make nodemedic-docker-build   # multi-arch container image
 make nodemedic-helm-lint      # chart lint + cluster-name guard test
 ```
 
-**Install** (test clusters only — Constitution Article I.9):
+**Install** (test clusters only — Constitution Article I.9; the chart guard
+accepts `cf1z` exact OR any `test-*` prefix and rejects everything else).
+
+The hackathon deploys to **cf1z (Azure kubeadm) first**. AWS/EKS lands later
+on `test-odd-wire`.
+
 ```sh
-kubectl --context=test-odd-wire create namespace cf-monitoring \
+# Azure / cf1z (deploy-first target)
+kubectl --context=cf1z create namespace cf-monitoring \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl --context=test-odd-wire -n cf-monitoring create secret generic \
+kubectl --context=cf1z -n cf-monitoring create secret generic \
   nodemedic-agent-token --from-literal=token="$AGENT_TOKEN"
-kubectl --context=test-odd-wire -n cf-monitoring create secret generic \
+kubectl --context=cf1z -n cf-monitoring create secret generic \
   nodemedic-slack --from-literal=webhook-url="$SLACK_WEBHOOK_URL"
 
+helm --kube-context=cf1z upgrade --install nodemedic-controller \
+  ./deployment/helm/nodemedic-controller \
+  -n cf-monitoring \
+  -f deployment/helm/nodemedic-controller/values-azure.yaml \
+  --set clusterName=cf1z
+```
+
+For the AWS/EKS variant, swap the kubeconfig context and values file:
+
+```sh
 helm --kube-context=test-odd-wire upgrade --install nodemedic-controller \
   ./deployment/helm/nodemedic-controller \
   -n cf-monitoring \

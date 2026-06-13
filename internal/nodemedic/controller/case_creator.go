@@ -147,13 +147,14 @@ func resolveCloudMetadata(node *corev1.Node) (
 		}
 		instanceID = id
 	case nodemedicv1alpha1.ProviderAzure:
-		// Azure parser lands in Phase 6 (US4 / T065). For US1 we error
-		// out so an Azure-side trigger doesn't silently produce an
-		// unparseable NHD.
-		return "", "", "", &MetadataResolutionError{
-			Field:  "instanceId",
-			Detail: "azure providerID parser not yet implemented (US4)",
+		id, perr := providerid.ParseAzure(node.Spec.ProviderID)
+		if perr != nil {
+			return "", "", "", &MetadataResolutionError{
+				Field:  "instanceId",
+				Detail: perr.Error(),
+			}
 		}
+		instanceID = id
 	default:
 		return "", "", "", &MetadataResolutionError{
 			Field:  "provider",

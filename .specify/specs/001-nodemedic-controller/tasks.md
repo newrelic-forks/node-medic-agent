@@ -184,14 +184,14 @@ description: "Task list for NodeMedic Controller (Scope 2 of AFA 2026 hackathon)
 
 ### Tests for User Story 4
 
-- [ ] T063 [P] [US4] Extend `internal/nodemedic/providerid/parse_test.go` — fixture-driven cases against `test/nodemedic/fixtures/node-azure.yaml`: valid Azure providerID extracts VM name, malformed Azure URI errors out, multi-segment paths handled correctly
-- [ ] T064 [P] [US4] Add envtest case in `test/nodemedic/envtest/reconciler_us1_test.go` parameterized over (eks, azure) fixtures — same assertions, different Node yaml
+- [x] T063 [P] [US4] Extended `internal/nodemedic/providerid/parse_test.go` — 9 Azure cases (standalone VM, VMSS instance, hyphenated names, trailing-slash trim, empty providerID, scheme-mismatch, missing /virtualMachines/ segment, empty VM name, extra path tail) plus a fixture round-trip against `test/nodemedic/fixtures/node-azure.yaml`.
+- [x] T064 [P] [US4] Refactored `case_creator_test.go` `TestCreateCase_HappyPath` into a table-driven AWS+Azure parameterized form (sharing the same assertions). Replaced the "azure not supported" failure case with a "malformed Azure providerID" case so the metadata-resolution-error matrix still has Azure coverage. (The envtest harness from T032 stays AWS-only — extending the integration test to Azure is deferred since the deploy-first plan makes that a real-cluster test rather than envtest.)
 
 ### Implementation for User Story 4
 
-- [ ] T065 [US4] Implement `ParseAzure(providerID string) (vmName string, err error)` in `internal/nodemedic/providerid/parse.go`; update the URI-scheme dispatcher to route to ParseAzure for `azure://`
-- [ ] T066 [US4] [P] Author `deployment/helm/nodemedic-controller/values-azure.yaml` — `clusterName: cf1z` (the legacy CF Azure kubeadm test cluster, per Constitution Article I.9), watchedConditions list, agentUrl
-- [ ] T067 [US4] Run [`quickstart.md`](./quickstart.md) Scenario F end-to-end on the Azure test cluster; capture `kubectl get nhd -o yaml` showing `provider=azure`, region resolved from Azure cloud-controller-manager labels, instanceId = VM name; verify AC-8
+- [x] T065 [US4] Implemented `ParseAzure(providerID string) (vmName string, err error)` in `internal/nodemedic/providerid/parse.go`; uses `strings.LastIndex("/virtualMachines/")` so both standalone VM and VMSS-instance shapes resolve to the trailing instance identifier. Updated `case_creator.go` resolver's Azure arm to call `ParseAzure` instead of returning the US1-stub error.
+- [x] T066 [US4] [P] Authored `deployment/helm/nodemedic-controller/values-azure.yaml` targeting `cf1z`. Verified: `helm template` with `--set clusterName=cf1z` renders cleanly; without the `--set` flag the cluster-name guard fires.
+- [ ] T067 [US4] **MANUAL — runs at hackathon time on real cluster.** Run [`quickstart.md`](./quickstart.md) Scenario F end-to-end on the cf1z Azure cluster; capture `kubectl get nhd -o yaml` showing `provider=azure`, `region=eastus2` (or whatever the cf1z cloud-controller-manager reports), `instanceId=<VM name>`; verify AC-8.
 
 **Checkpoint**: AC-8 green. One binary, two clouds (Constitution II.7) is demonstrated.
 

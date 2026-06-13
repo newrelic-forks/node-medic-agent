@@ -12,9 +12,16 @@ You may obtain a copy of the License at
 // Node and returns the cloud-specific instance identifier per spec
 // FR-2.
 //
-// In Phase 3 (US1) this package only handles AWS. The Azure parser
-// lands in Phase 6 (US4 / T065) when we re-target the dispatcher to
-// route on the URI scheme.
+// AWS shape: `aws:///<az>/<instance-id>` — last segment is the
+// EC2 instance id.
+// Azure shapes (cloud-provider-azure):
+//   - Standalone VM:
+//     `azure:///subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Compute/virtualMachines/<vm-name>`
+//   - VM Scale Set instance:
+//     `azure:///subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Compute/virtualMachineScaleSets/<vmss>/virtualMachines/<instance-id>`
+//
+// ParseAzure returns the last segment after `/virtualMachines/` in
+// either shape.
 package providerid
 
 import (
@@ -64,4 +71,48 @@ func ParseAWS(providerID string) (instanceID string, err error) {
 		return "", fmt.Errorf("%w: %q (instance id must start with `i-`, got %q)", ErrMalformed, providerID, instanceID)
 	}
 	return instanceID, nil
+}
+
+// azureVMSegment is the marker we split on. Both standalone-VM and
+// VMSS-instance providerIDs end with `/virtualMachines/<name>`.
+const azureVMSegment = "/virtualMachines/"
+
+// ParseAzure extracts the Azure VM instance identifier from a
+// providerID that begins with `azure://` and contains
+// `/virtualMachines/<name>` as its trailing segment.
+//
+// For standalone VMs the returned name is the VM resource name
+// (matches `Node.Name` on cloud-provider-azure-managed clusters).
+// For VMSS instances it's the per-instance numeric/alphabetic id
+// (combined with the VMSS name to be globally unique). Either way,
+// it's what the agent needs to dispatch the Azure-side Cloud-Info
+// MCP backend.
+func ParseAzure(providerID string) (instanceID string, err error) {
+	if providerID == "" {
+		return "", ErrEmpty
+	}
+	if !strings.HasPrefix(providerID, "azure://") {
+		return "", fmt.Errorf("%w: %q (expected `azure://` prefix)", ErrUnsupportedScheme, providerID)
+	}
+
+	// Use LastIndex so VMSS shapes (which contain
+	// `/virtualMachineScaleSets/.../virtualMachines/<n>`) resolve to
+	// the trailing instance id, not the VMSS name.
+	idx := strings.LastIndex(providerID, azureVMSegment)
+	if idx < 0 {
+		return "", fmt.Errorf("%w: %q (missing `%s` segment)", ErrMalformed, providerID, azureVMSegment)
+	}
+	tail := providerID[idx+len(azureVMSegment):]
+
+	// Defensive: trim any trailing `/` (shouldn't happen on real
+	// cloud-provider-azure output, but we don't trust the wire).
+	tail = strings.TrimRight(tail, "/")
+
+	if tail == "" {
+		return "", fmt.Errorf("%w: %q (empty VM name after `%s`)", ErrMalformed, providerID, azureVMSegment)
+	}
+	if strings.Contains(tail, "/") {
+		return "", fmt.Errorf("%w: %q (unexpected `/` after VM segment in %q)", ErrMalformed, providerID, tail)
+	}
+	return tail, nil
 }

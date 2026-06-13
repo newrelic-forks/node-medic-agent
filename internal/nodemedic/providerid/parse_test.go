@@ -121,3 +121,110 @@ func TestParseAWS_FromFixture(t *testing.T) {
 	}
 	t.Logf("fixture parsed OK: providerID=%q instanceID=%q", node.Spec.ProviderID, id)
 }
+
+func TestParseAzure(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		providerID string
+		want       string
+		wantErr    error
+	}{
+		{
+			name:       "standalone VM",
+			providerID: "azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/cf1z-rg/providers/Microsoft.Compute/virtualMachines/cf1z-worker-vm-04",
+			want:       "cf1z-worker-vm-04",
+		},
+		{
+			name:       "VMSS instance",
+			providerID: "azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/cf1z-rg/providers/Microsoft.Compute/virtualMachineScaleSets/cf1z-vmss/virtualMachines/4",
+			want:       "4",
+		},
+		{
+			name:       "VM name with hyphens and digits",
+			providerID: "azure:///subscriptions/abc/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/aks-nodepool1-12345678-vmss000004",
+			want:       "aks-nodepool1-12345678-vmss000004",
+		},
+		{
+			name:       "trailing slash trimmed",
+			providerID: "azure:///subscriptions/abc/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/cf1z-worker-vm-04/",
+			want:       "cf1z-worker-vm-04",
+		},
+		{
+			name:       "empty providerID",
+			providerID: "",
+			wantErr:    ErrEmpty,
+		},
+		{
+			name:       "aws scheme rejected",
+			providerID: "aws:///us-east-2a/i-0abc1234deadbeef",
+			wantErr:    ErrUnsupportedScheme,
+		},
+		{
+			name:       "missing virtualMachines segment",
+			providerID: "azure:///subscriptions/abc/resourceGroups/rg/providers/Microsoft.Compute/availabilitySets/as-01",
+			wantErr:    ErrMalformed,
+		},
+		{
+			name:       "empty VM name",
+			providerID: "azure:///subscriptions/abc/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/",
+			wantErr:    ErrMalformed,
+		},
+		{
+			name:       "extra path after VM segment",
+			providerID: "azure:///subscriptions/abc/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/cf1z-vm-01/foo",
+			wantErr:    ErrMalformed,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseAzure(tc.providerID)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("ParseAzure(%q) error = %v, want sentinel %v", tc.providerID, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseAzure(%q) unexpected error: %v", tc.providerID, err)
+			}
+			if got != tc.want {
+				t.Errorf("ParseAzure(%q) = %q, want %q", tc.providerID, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseAzure_FromFixture mirrors TestParseAWS_FromFixture: lock the
+// committed Azure Node fixture against what the parser expects.
+func TestParseAzure_FromFixture(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", "..", "test", "nodemedic", "fixtures", "node-azure.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", path, err)
+	}
+
+	var node corev1.Node
+	if err := yaml.Unmarshal(data, &node); err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+
+	if node.Spec.ProviderID == "" {
+		t.Fatal("fixture has empty spec.providerID — this would also break FR-2 at runtime")
+	}
+
+	id, err := ParseAzure(node.Spec.ProviderID)
+	if err != nil {
+		t.Fatalf("ParseAzure(fixture providerID = %q): %v", node.Spec.ProviderID, err)
+	}
+	if id == "" {
+		t.Fatal("ParseAzure returned empty instance id")
+	}
+	t.Logf("fixture parsed OK: providerID=%q instanceID=%q", node.Spec.ProviderID, id)
+}

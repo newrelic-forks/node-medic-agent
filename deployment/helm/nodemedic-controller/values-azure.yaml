@@ -1,0 +1,24 @@
+# Azure overrides for the NodeMedic controller chart.
+#
+# `cf1z` is the legacy Container Fabric Azure kubeadm test cluster
+# (sister to jc1z / sk1z). Per Constitution Article I.9 it's the only
+# Azure-side name accepted by the chart's cluster-name guard alongside
+# `test-*` AWS/EKS clusters.
+#
+# Apply with:
+#   helm --kube-context=cf1z upgrade --install nodemedic-controller \
+#     ./deployment/helm/nodemedic-controller \
+#     -n cf-monitoring \
+#     -f deployment/helm/nodemedic-controller/values-azure.yaml \
+#     --set clusterName=cf1z
+#
+# `clusterName` is deliberately not defaulted — set it explicitly per
+# install so an accidental file-only override can't bypass the per-
+# cluster guard.
+
+config:
+  agentURL: "http://nodemedic-agent.cf-monitoring.svc:8080/diagnose"
+
+image:
+  repository: ghcr.io/cf/nodemedic-controller
+  tag: "0.1.0"

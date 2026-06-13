@@ -53,59 +53,104 @@ func eksNode() *corev1.Node {
 	}
 }
 
+// azureNode mirrors test/nodemedic/fixtures/node-azure.yaml (cf1z
+// kubeadm). Used to exercise the Azure arm of FR-2's resolver.
+func azureNode() *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cf1z-worker-vm-04",
+			Labels: map[string]string{
+				"cf.newrelic.com/cloud-provider": "azure",
+				"topology.kubernetes.io/region":  "eastus2",
+			},
+		},
+		Spec: corev1.NodeSpec{
+			ProviderID: "azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/cf1z-rg/providers/Microsoft.Compute/virtualMachines/cf1z-worker-vm-04",
+		},
+	}
+}
+
 func TestCreateCase_HappyPath(t *testing.T) {
 	t.Parallel()
-	node := eksNode()
-	scheme := nhdScheme(t)
-	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
-
-	ts := time.Date(2026, 6, 12, 15, 0, 0, 0, time.UTC)
-	deadline := ts.Add(60 * time.Second)
-	trigger := Trigger{
-		Node:          node,
-		ConditionType: "ConntrackSaturated",
-		Reason:        "ConntrackHigh",
-		Message:       "nf_conntrack_count=262100",
-		ObservedAt:    ts,
+	cases := []struct {
+		name         string
+		node         *corev1.Node
+		clusterName  string
+		wantProvider nodemedicv1alpha1.Provider
+		wantRegion   string
+		wantInstance string
+	}{
+		{
+			name:         "AWS / EKS",
+			node:         eksNode(),
+			clusterName:  "test-odd-wire",
+			wantProvider: nodemedicv1alpha1.ProviderAWS,
+			wantRegion:   "us-east-2",
+			wantInstance: "i-0abc1234deadbeef",
+		},
+		{
+			name:         "Azure / cf1z kubeadm",
+			node:         azureNode(),
+			clusterName:  "cf1z",
+			wantProvider: nodemedicv1alpha1.ProviderAzure,
+			wantRegion:   "eastus2",
+			wantInstance: "cf1z-worker-vm-04",
+		},
 	}
 
-	nhd, err := CreateCase(context.Background(), cli, trigger,
-		"test-odd-wire", "cf-monitoring",
-		15, "0.50", deadline,
-	)
-	if err != nil {
-		t.Fatalf("CreateCase: %v", err)
-	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			scheme := nhdScheme(t)
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tc.node).Build()
 
-	if nhd.Spec.Case.NodeName != node.Name {
-		t.Errorf("NodeName = %q, want %q", nhd.Spec.Case.NodeName, node.Name)
-	}
-	if nhd.Spec.Case.Provider != nodemedicv1alpha1.ProviderAWS {
-		t.Errorf("Provider = %q, want aws", nhd.Spec.Case.Provider)
-	}
-	if nhd.Spec.Case.Region != "us-east-2" {
-		t.Errorf("Region = %q", nhd.Spec.Case.Region)
-	}
-	if nhd.Spec.Case.InstanceId != "i-0abc1234deadbeef" {
-		t.Errorf("InstanceId = %q", nhd.Spec.Case.InstanceId)
-	}
-	if nhd.Spec.Case.CaseId == "" {
-		t.Error("CaseId not generated")
-	}
-	wantName := NameForCase(node.Name, ts)
-	if nhd.Name != wantName {
-		t.Errorf("nhd.Name = %q, want %q", nhd.Name, wantName)
-	}
-	if nhd.Namespace != "cf-monitoring" {
-		t.Errorf("Namespace = %q", nhd.Namespace)
-	}
+			ts := time.Date(2026, 6, 12, 15, 0, 0, 0, time.UTC)
+			trigger := Trigger{
+				Node:          tc.node,
+				ConditionType: "ConntrackSaturated",
+				Reason:        "ConntrackHigh",
+				Message:       "nf_conntrack_count=262100",
+				ObservedAt:    ts,
+			}
+			nhd, err := CreateCase(context.Background(), cli, trigger,
+				tc.clusterName, "cf-monitoring",
+				15, "0.50", ts.Add(60*time.Second),
+			)
+			if err != nil {
+				t.Fatalf("CreateCase: %v", err)
+			}
 
-	// Verify it actually persisted.
-	var fresh nodemedicv1alpha1.NodeHealthDiagnosisAI
-	if err := cli.Get(context.Background(),
-		client.ObjectKey{Name: nhd.Name, Namespace: nhd.Namespace},
-		&fresh); err != nil {
-		t.Fatalf("get after create: %v", err)
+			if nhd.Spec.Case.NodeName != tc.node.Name {
+				t.Errorf("NodeName = %q, want %q", nhd.Spec.Case.NodeName, tc.node.Name)
+			}
+			if nhd.Spec.Case.Provider != tc.wantProvider {
+				t.Errorf("Provider = %q, want %q", nhd.Spec.Case.Provider, tc.wantProvider)
+			}
+			if nhd.Spec.Case.Region != tc.wantRegion {
+				t.Errorf("Region = %q, want %q", nhd.Spec.Case.Region, tc.wantRegion)
+			}
+			if nhd.Spec.Case.InstanceId != tc.wantInstance {
+				t.Errorf("InstanceId = %q, want %q", nhd.Spec.Case.InstanceId, tc.wantInstance)
+			}
+			if nhd.Spec.Case.CaseId == "" {
+				t.Error("CaseId not generated")
+			}
+			wantName := NameForCase(tc.node.Name, ts)
+			if nhd.Name != wantName {
+				t.Errorf("nhd.Name = %q, want %q", nhd.Name, wantName)
+			}
+			if nhd.Namespace != "cf-monitoring" {
+				t.Errorf("Namespace = %q", nhd.Namespace)
+			}
+
+			var fresh nodemedicv1alpha1.NodeHealthDiagnosisAI
+			if err := cli.Get(context.Background(),
+				client.ObjectKey{Name: nhd.Name, Namespace: nhd.Namespace},
+				&fresh); err != nil {
+				t.Fatalf("get after create: %v", err)
+			}
+		})
 	}
 }
 
@@ -194,10 +239,10 @@ func TestCreateCase_MetadataResolutionFailures(t *testing.T) {
 			wantField: "instanceId",
 		},
 		{
-			name: "azure provider not yet supported in US1",
+			name: "malformed Azure providerID",
 			mutate: func(n *corev1.Node) {
 				n.Labels["cf.newrelic.com/cloud-provider"] = "azure"
-				n.Spec.ProviderID = "azure:///subscriptions/x/resourceGroups/y/providers/Microsoft.Compute/virtualMachines/vm"
+				n.Spec.ProviderID = "azure:///subscriptions/x/resourceGroups/y/providers/Microsoft.Compute/availabilitySets/as"
 			},
 			wantField: "instanceId",
 		},
