@@ -11,10 +11,15 @@
 #
 # Or via the Makefile: `make nodemedic-docker-build IMG=...`.
 #
-# "builder-base" can be overridden via `docker buildx --build-context
-# builder-base=docker-image://golang:<other>@sha256:<digest>` for testing
-# alternate Go toolchains, mirroring the pattern in the NPD Dockerfile.
-FROM golang:1.25.9-bookworm@sha256:298734aec230b5f3e8cee450ce6d7eccc39f1797ba548ee90d57e9803030c6c3 AS builder-base
+# Base images are pulled through `cf-registry.nr-ops.net`'s upstream mirrors
+# (docker.io for golang, registry.k8s.io for the runtime image) so cf1z and
+# other CF clusters don't depend on docker.io's anonymous-pull rate-limit
+# at deploy time. A production hardening pass should re-add @sha256
+# digest pins after capturing the mirror's specific digests.
+#
+# Override at build time with --build-context to test alternate toolchains:
+#   docker buildx build --build-context builder-base=docker-image://golang:<x>
+FROM cf-registry.nr-ops.net/docker.io/library/golang:1.25 AS builder-base
 FROM --platform=$BUILDPLATFORM builder-base AS builder
 
 ARG TARGETARCH
@@ -23,6 +28,10 @@ ARG TARGETOS=linux
 ENV GOPATH=/gopath/
 ENV PATH=$GOPATH/bin:$PATH
 ENV CGO_ENABLED=0
+# Allow on-demand toolchain download — go.mod's `go 1.26` directive may
+# exceed the base image's bundled Go (cf-registry's golang:1.25 ships
+# 1.25.11 today). The official base sets GOTOOLCHAIN=local; override.
+ENV GOTOOLCHAIN=auto
 RUN go version
 
 COPY . /src/
@@ -37,9 +46,14 @@ RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
       -o /out/nodemedic-controller \
       ./cmd/nodemedic-controller
 
-# Distroless static — no shell, no package manager, only ca-certificates and
-# /etc/passwd for the nonroot user. Aligns with controller-runtime conventions.
-FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+# Alpine runtime — the controller binary is statically linked
+# (CGO_ENABLED=0) so musl-vs-glibc isn't an issue. ca-certificates are
+# required for outbound HTTPS to the Slack webhook.
+FROM cf-registry.nr-ops.net/docker.io/library/alpine:latest AS runtime
+
+RUN apk add --no-cache ca-certificates && \
+    addgroup -g 65532 nonroot && \
+    adduser -D -u 65532 -G nonroot nonroot
 
 COPY --from=builder /out/nodemedic-controller /usr/local/bin/nodemedic-controller
 

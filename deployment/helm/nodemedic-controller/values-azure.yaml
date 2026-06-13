@@ -20,5 +20,5 @@ config:
   agentURL: "http://nodemedic-agent.cf-monitoring.svc:8080/diagnose"
 
 image:
-  repository: ghcr.io/cf/nodemedic-controller
-  tag: "0.1.0"
+  repository: cf-registry.nr-ops.net/container-fabric/nodemedic-controller
+  tag: "dev-cf1z-aa70a7b8"
