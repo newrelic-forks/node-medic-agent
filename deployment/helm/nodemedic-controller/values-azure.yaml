@@ -20,5 +20,9 @@ config:
   agentURL: "http://nodemedic-agent.cf-monitoring.svc:8080/diagnose"
 
 image:
-  repository: cf-registry.nr-ops.net/container-fabric/nodemedic-controller
-  tag: "dev-cf1z-aa70a7b8"
+  # Hackathon dev image; pushed to a personal Docker Hub repo because
+  # cf-registry.nr-ops.net/container-fabric/* requires CI service-
+  # account credentials we don't have at the laptop. Migrate to
+  # cf-registry once a CI push pipeline is in place.
+  repository: docker.io/shahrelic/hack-2026-nodemedic
+  tag: "dev-cf1z-3ac1550a"
