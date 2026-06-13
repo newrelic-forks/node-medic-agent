@@ -290,6 +290,35 @@ func (r *NHDReconciler) humanInLoopPath(
 	nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI,
 	gate GateResult,
 ) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Slack first, then status. If Slack fails we still record the
+	// HumanInLoop decision so the operator sees the case in
+	// `kubectl get nhd`; the NotifierFailed Event is the secondary
+	// signal that the side-channel notification didn't land.
+	payload, buildErr := notifier.BuildHumanInLoop(notifier.HumanInLoopInput{
+		NodeName:    nhd.Spec.Case.NodeName,
+		ClusterName: nhd.Spec.Case.ClusterName,
+		Namespace:   nhd.Namespace,
+		NHDName:     nhd.Name,
+		Diagnosis:   nhd.Status.Diagnosis,
+		GateReason:  gate.Reason,
+	})
+	if buildErr != nil {
+		r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "NotifierFailed",
+			"BuildHumanInLoop: %v", buildErr)
+	} else {
+		res := r.Slack.Post(ctx, payload)
+		if res.Posted {
+			metrics.SlackPostTotal.WithLabelValues(metrics.SlackKindHumanInLoop, metrics.SlackResultOK).Inc()
+		} else {
+			metrics.SlackPostTotal.WithLabelValues(metrics.SlackKindHumanInLoop, metrics.SlackResultErr).Inc()
+			r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "NotifierFailed",
+				"slack post (HumanInLoop) failed after %d attempts: %v", res.Attempts, res.LastErr)
+		}
+	}
+	logger.Info("gate-fail HumanInLoop", "node", nhd.Spec.Case.NodeName, "reason", gate.Reason)
+
 	now := r.now()
 	patchBase := nhd.DeepCopy()
 	nhd.Status.Action = &nodemedicv1alpha1.ActionStatus{
@@ -311,7 +340,6 @@ func (r *NHDReconciler) humanInLoopPath(
 	metrics.CasesTotal.WithLabelValues(metrics.OutcomeHumanInLoop).Inc()
 	r.Recorder.Eventf(nhd, corev1.EventTypeNormal, "PhaseTransition",
 		"%s -> Acted (HumanInLoop)", nodemedicv1alpha1.PhaseDiagnosed)
-	// Phase 4 (US2) adds notifier.BuildHumanInLoop + Slack.Post here.
 	return ctrl.Result{}, nil
 }
 

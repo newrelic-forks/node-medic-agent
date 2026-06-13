@@ -112,6 +112,106 @@ func TestBuildApplied_NilDiagnosis(t *testing.T) {
 	}
 }
 
+func goldenHumanInLoopInput() HumanInLoopInput {
+	return HumanInLoopInput{
+		NodeName:    "ip-10-1-2-3.us-east-2.compute.internal",
+		ClusterName: "cf1z",
+		Namespace:   "cf-monitoring",
+		NHDName:     "ip-10-1-2-3-humaninloop-fixture",
+		Diagnosis: &nodemedicv1alpha1.Diagnosis{
+			RootCause:   "conntrack table climbing but a single nrql data source isn't enough to commit to cordon",
+			RCACategory: nodemedicv1alpha1.RCACategory("Conntrack"),
+			Confidence:  0.5,
+		},
+		GateReason: "gate failed: confidence 0.50 < min 0.70; distinct sources 1 < min 2",
+	}
+}
+
+func TestBuildHumanInLoop_Shape(t *testing.T) {
+	t.Parallel()
+	out, err := BuildHumanInLoop(goldenHumanInLoopInput())
+	if err != nil {
+		t.Fatalf("BuildHumanInLoop: %v", err)
+	}
+
+	var env slackEnvelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+
+	wantHeader := "NodeMedic: ip-10-1-2-3.us-east-2.compute.internal – needs human review (conf 0.50)"
+	if env.Text != wantHeader {
+		t.Errorf("Text = %q, want %q", env.Text, wantHeader)
+	}
+	if len(env.Blocks) < 5 {
+		t.Fatalf("blocks = %d, want >= 5 (header, fields, gate-reason, rca, kubectl)", len(env.Blocks))
+	}
+	if env.Blocks[0].Text == nil || env.Blocks[0].Text.Text != wantHeader {
+		t.Errorf("header block wrong: %+v", env.Blocks[0])
+	}
+
+	// Walk the decoded blocks rather than substring-matching the raw
+	// JSON — keeps assertions readable and avoids tripping on JSON
+	// escapes (e.g. `<` serializing to `<`).
+	var (
+		sawHumanReview bool
+		sawNotCordoned bool
+		sawGateReason  bool
+		sawKubectl     bool
+	)
+	for _, b := range env.Blocks {
+		if b.Text != nil {
+			if strings.Contains(b.Text.Text, "needs human review") {
+				sawHumanReview = true
+			}
+			if strings.Contains(b.Text.Text, "confidence 0.50 < min 0.70") {
+				sawGateReason = true
+			}
+			if strings.Contains(b.Text.Text, "kubectl --context=cf1z -n cf-monitoring get nhd ip-10-1-2-3-humaninloop-fixture -o yaml") {
+				sawKubectl = true
+			}
+		}
+		for _, f := range b.Fields {
+			if strings.Contains(f.Text, "NOT cordoned") {
+				sawNotCordoned = true
+			}
+		}
+	}
+	if !sawHumanReview {
+		t.Errorf("missing 'needs human review' framing in rendered blocks")
+	}
+	if !sawNotCordoned {
+		t.Errorf("missing 'NOT cordoned' action framing in fields")
+	}
+	if !sawGateReason {
+		t.Errorf("gate reason not surfaced verbatim: %s", out)
+	}
+	if !sawKubectl {
+		t.Errorf("missing kubectl block: %s", out)
+	}
+}
+
+func TestBuildHumanInLoop_NilDiagnosis(t *testing.T) {
+	t.Parallel()
+	_, err := BuildHumanInLoop(HumanInLoopInput{NodeName: "x"})
+	if err == nil {
+		t.Error("expected error for nil diagnosis")
+	}
+}
+
+func TestBuildHumanInLoop_FallbackGateReason(t *testing.T) {
+	t.Parallel()
+	in := goldenHumanInLoopInput()
+	in.GateReason = ""
+	out, err := BuildHumanInLoop(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "no gate reason recorded") {
+		t.Errorf("expected fallback text when GateReason is empty: %s", out)
+	}
+}
+
 func TestSlack_Post_Success(t *testing.T) {
 	t.Parallel()
 	var attempts int32

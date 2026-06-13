@@ -11,8 +11,9 @@ You may obtain a copy of the License at
 // Package notifier builds and posts Slack Block Kit messages for the
 // terminal outcomes of an NHD case.
 //
-// In Phase 3 (US1) only BuildApplied lands. BuildHumanInLoop arrives
-// in Phase 4 (US2 / T053); BuildCritical in Phase 5 (US3 / T058).
+// Phase 3 (US1): BuildApplied — gate-pass + cordon.
+// Phase 4 (US2): BuildHumanInLoop — gate-fail; node NOT cordoned.
+// Phase 5 (US3): BuildCritical — agent failed; deferred.
 package notifier
 
 import (
@@ -31,6 +32,18 @@ type AppliedInput struct {
 	Namespace   string // CR namespace (cf-monitoring), used for the kubectl link
 	NHDName     string // metadata.name of the NHD
 	Diagnosis   *nodemedicv1alpha1.Diagnosis
+}
+
+// HumanInLoopInput is the data needed to build the gate-failure
+// Slack message. Mirrors AppliedInput but adds the gate's reason so
+// the message tells the on-call WHY the gate didn't fire.
+type HumanInLoopInput struct {
+	NodeName    string
+	ClusterName string
+	Namespace   string
+	NHDName     string
+	Diagnosis   *nodemedicv1alpha1.Diagnosis // may be partial
+	GateReason  string                       // pre-formatted from controller.GateResult.Reason
 }
 
 // BuildApplied returns the Slack JSON payload for a gate-pass +
@@ -73,6 +86,71 @@ func BuildApplied(in AppliedInput) ([]byte, error) {
 					{Type: "mrkdwn", Text: "*Action:* cordoned"},
 				},
 			},
+			{Type: "section", Text: &slackText{Type: "mrkdwn", Text: "*RCA:* " + rca}},
+			{Type: "section", Text: &slackText{Type: "mrkdwn", Text: "*Inspect:*\n" + kubectlBlock}},
+		},
+	}
+
+	if auditURL != "" {
+		msg.Blocks = append(msg.Blocks, slackBlock{
+			Type: "section",
+			Text: &slackText{Type: "mrkdwn", Text: "*Audit log:* " + auditURL},
+		})
+	}
+
+	return json.Marshal(msg)
+}
+
+// BuildHumanInLoop returns the Slack JSON payload for a gate-failure
+// case. Spec FR-9: distinct framing from `Applied` (the operator must
+// be able to tell at a glance that the node was NOT cordoned). We
+// surface that with a different header verb ("needs human review"),
+// an explicit Action field reading "NOT cordoned", and the gate's
+// failure reason in its own block.
+//
+// Fields like RCA / kubectl-block / audit-log mirror the Applied
+// shape so the on-call doesn't have to learn two layouts.
+func BuildHumanInLoop(in HumanInLoopInput) ([]byte, error) {
+	if in.Diagnosis == nil {
+		return nil, fmt.Errorf("BuildHumanInLoop: nil diagnosis")
+	}
+	d := in.Diagnosis
+
+	header := fmt.Sprintf("NodeMedic: %s – needs human review (conf %.2f)",
+		in.NodeName, d.Confidence)
+
+	rca := d.RootCause
+	if rca == "" {
+		rca = "(no root-cause text)"
+	}
+
+	gateReason := in.GateReason
+	if gateReason == "" {
+		gateReason = "(no gate reason recorded)"
+	}
+
+	kubectlBlock := fmt.Sprintf(
+		"```\nkubectl --context=%s -n %s get nhd %s -o yaml\n```",
+		in.ClusterName, fallback(in.Namespace, "cf-monitoring"), in.NHDName,
+	)
+
+	auditURL := ""
+	if d.AuditLogRef != nil {
+		auditURL = d.AuditLogRef.ObjectStore
+	}
+
+	msg := slackEnvelope{
+		Text: header,
+		Blocks: []slackBlock{
+			{Type: "header", Text: &slackText{Type: "plain_text", Text: header}},
+			{
+				Type: "section",
+				Fields: []slackText{
+					{Type: "mrkdwn", Text: "*Cluster:* " + in.ClusterName},
+					{Type: "mrkdwn", Text: "*Action:* NOT cordoned — needs review"},
+				},
+			},
+			{Type: "section", Text: &slackText{Type: "mrkdwn", Text: "*Why the gate didn't fire:* " + gateReason}},
 			{Type: "section", Text: &slackText{Type: "mrkdwn", Text: "*RCA:* " + rca}},
 			{Type: "section", Text: &slackText{Type: "mrkdwn", Text: "*Inspect:*\n" + kubectlBlock}},
 		},

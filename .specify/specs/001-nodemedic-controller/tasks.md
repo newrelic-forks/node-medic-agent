@@ -139,15 +139,15 @@ description: "Task list for NodeMedic Controller (Scope 2 of AFA 2026 hackathon)
 
 ### Tests for User Story 2
 
-- [ ] T050 [P] [US2] Extend `internal/nodemedic/notifier/slack_test.go` — golden JSON for `BuildHumanInLoop(...)` matches data-model §8 (red/critical framing, "needs human review" header)
-- [ ] T051 [P] [US2] Author `test/nodemedic/envtest/reconciler_us2_test.go` — apply NHD with `phase=Diagnosed`, `confidence=0.5`, `evidence=[nrql, ssh]`, `recommendation.action=Cordon`. Assert `Node.spec.unschedulable` is **never** patched, NHD `decision=HumanInLoop`, mocked Slack received one POST whose payload matches the HumanInLoop golden
+- [x] T050 [P] [US2] Extended `internal/nodemedic/notifier/slack_test.go` — `TestBuildHumanInLoop_Shape` walks decoded blocks (avoids JSON-escape pitfalls), asserts `needs human review` header + `NOT cordoned` action field + verbatim gate-reason embed + reused kubectl-block layout. Plus nil-diagnosis + empty-gate-reason fallback cases.
+- [x] T051 [P] [US2] Authored `internal/nodemedic/controller/us2_envtest_test.go` (build-tag gated) — applies a Diagnosed NHD with confidence 0.5 and 1 evidence source (fails both non-action clauses simultaneously). Asserts: phase reaches Acted, decision=HumanInLoop, operation=noop, **Node.spec.unschedulable stays false**, Slack mock got exactly one POST, ActionApplied Condition message names both failing clauses verbatim.
 
 ### Implementation for User Story 2
 
-- [ ] T052 [US2] Author `test/nodemedic/fixtures/nhd-humaninloop.yaml` — canned NHD: `confidence=0.5, evidence=[{source:nrql},{source:ssh}], recommendation.action=Cordon`
-- [ ] T053 [US2] Add `BuildHumanInLoop(nhd, gateReason) []byte` to `internal/nodemedic/notifier/messages.go` — distinct color/severity, mirrors Applied body otherwise
-- [ ] T054 [US2] Extend `internal/nodemedic/controller/nhd_reconciler.go` `Diagnosed→Acted` arm — on gate fail: do NOT call cordon, set `decision=HumanInLoop`, call `Slack.Post(BuildHumanInLoop(...))`, emit `ActionApplied` Condition with `reason=HumanInLoop`
-- [ ] T055 [US2] Run [`quickstart.md`](./quickstart.md) Scenario B on `test-odd-wire` against T052 fixture; verify AC-4
+- [x] T052 [US2] Authored `test/nodemedic/fixtures/nhd-humaninloop.yaml` with confidence 0.5 + a single nrql evidence entry + recommendation.action=Cordon. Drives the gate-fail demo path without the agent being live.
+- [x] T053 [US2] Added `BuildHumanInLoop(HumanInLoopInput) []byte` to `internal/nodemedic/notifier/messages.go` — distinct header verb (`needs human review`), explicit `Action: NOT cordoned` field, dedicated *Why the gate didn't fire* block carrying `GateResult.Reason` verbatim, audit-log section appears only when `AuditLogRef` is set.
+- [x] T054 [US2] Extended `internal/nodemedic/controller/nhd_reconciler.go` `humanInLoopPath` — Slack first (so the operator gets paged even if the status patch races against another reconcile), then status update. NotifierFailed Event on Slack failure; `nodemedic_slack_post_total{kind=HumanInLoop,result=...}` recorded both ways.
+- [ ] T055 [US2] **MANUAL — runs at hackathon time on real cluster.** Apply `test/nodemedic/fixtures/nhd-humaninloop.yaml` to `cf1z` and verify: `kubectl get node <n> -o jsonpath='{.spec.unschedulable}'` is empty (no cordon), Slack channel receives the gate-fail message, `kubectl get nhd <name> -o yaml` shows `decision: HumanInLoop`. Verifies AC-4.
 
 **Checkpoint**: AC-4 green. Gate-fail demo path works.
 
