@@ -212,6 +212,125 @@ func TestBuildHumanInLoop_FallbackGateReason(t *testing.T) {
 	}
 }
 
+func goldenCriticalInput() CriticalInput {
+	return CriticalInput{
+		NodeName:      "ip-10-1-2-3.us-east-2.compute.internal",
+		ClusterName:   "cf1z",
+		Namespace:     "cf-monitoring",
+		NHDName:       "ip-10-1-2-3-critical-fixture",
+		FailureReason: "DeadlineExceeded",
+		FailureDetail: "agent did not write phase=Diagnosed before retried deadline 2026-06-12T15:01:00Z",
+		Attempts:      2,
+	}
+}
+
+func TestBuildCritical_Shape(t *testing.T) {
+	t.Parallel()
+	out, err := BuildCritical(goldenCriticalInput())
+	if err != nil {
+		t.Fatalf("BuildCritical: %v", err)
+	}
+
+	var env slackEnvelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+
+	wantHeader := "NodeMedic: ip-10-1-2-3.us-east-2.compute.internal – AGENT FAILED"
+	if env.Text != wantHeader {
+		t.Errorf("Text = %q, want %q", env.Text, wantHeader)
+	}
+	if env.Blocks[0].Text == nil || env.Blocks[0].Text.Text != wantHeader {
+		t.Errorf("header block wrong: %+v", env.Blocks[0])
+	}
+
+	var (
+		sawAgentFailed     bool
+		sawNotCordoned     bool
+		sawDeadlineReason  bool
+		sawDetail          bool
+		sawAttemptsBurnt   bool
+		sawKubectl         bool
+	)
+	for _, b := range env.Blocks {
+		if b.Text != nil {
+			t := b.Text.Text
+			if strings.Contains(t, "AGENT FAILED") {
+				sawAgentFailed = true
+			}
+			if strings.Contains(t, "DeadlineExceeded") {
+				sawDeadlineReason = true
+			}
+			if strings.Contains(t, "agent did not write phase=Diagnosed before retried deadline") {
+				sawDetail = true
+			}
+			if strings.Contains(t, "after 2 attempt(s)") {
+				sawAttemptsBurnt = true
+			}
+			if strings.Contains(t, "kubectl --context=cf1z -n cf-monitoring get nhd ip-10-1-2-3-critical-fixture -o yaml") {
+				sawKubectl = true
+			}
+		}
+		for _, f := range b.Fields {
+			if strings.Contains(f.Text, "NOT cordoned") {
+				sawNotCordoned = true
+			}
+		}
+	}
+	if !sawAgentFailed {
+		t.Errorf("missing 'AGENT FAILED' framing")
+	}
+	if !sawNotCordoned {
+		t.Errorf("missing 'NOT cordoned' action framing")
+	}
+	if !sawDeadlineReason {
+		t.Errorf("missing failure reason DeadlineExceeded")
+	}
+	if !sawDetail {
+		t.Errorf("missing failure detail verbatim: %s", out)
+	}
+	if !sawAttemptsBurnt {
+		t.Errorf("missing 'after 2 attempt(s)' framing")
+	}
+	if !sawKubectl {
+		t.Errorf("missing kubectl block")
+	}
+}
+
+func TestBuildCritical_RequiredFields(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   CriticalInput
+	}{
+		{"empty NodeName", CriticalInput{FailureReason: "x"}},
+		{"empty FailureReason", CriticalInput{NodeName: "x"}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := BuildCritical(tc.in); err == nil {
+				t.Errorf("expected error")
+			}
+		})
+	}
+}
+
+func TestBuildCritical_DefaultAttempts(t *testing.T) {
+	t.Parallel()
+	in := goldenCriticalInput()
+	in.Attempts = 0
+	out, err := BuildCritical(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Default to 1 when caller didn't fill it in.
+	if !strings.Contains(string(out), "after 1 attempt(s)") {
+		t.Errorf("expected default 1 attempt: %s", out)
+	}
+}
+
 func TestSlack_Post_Success(t *testing.T) {
 	t.Parallel()
 	var attempts int32

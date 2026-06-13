@@ -13,7 +13,8 @@ You may obtain a copy of the License at
 //
 // Phase 3 (US1): BuildApplied — gate-pass + cordon.
 // Phase 4 (US2): BuildHumanInLoop — gate-fail; node NOT cordoned.
-// Phase 5 (US3): BuildCritical — agent failed; deferred.
+// Phase 5 (US3): BuildCritical — agent failed terminally (after one
+//                retry); node NOT cordoned, on-call paged.
 package notifier
 
 import (
@@ -44,6 +45,19 @@ type HumanInLoopInput struct {
 	NHDName     string
 	Diagnosis   *nodemedicv1alpha1.Diagnosis // may be partial
 	GateReason  string                       // pre-formatted from controller.GateResult.Reason
+}
+
+// CriticalInput drives BuildCritical. The agent never produced a
+// usable diagnosis (timeout, 4xx, or two consecutive failures), so
+// most fields are degenerate compared to Applied / HumanInLoop.
+type CriticalInput struct {
+	NodeName      string
+	ClusterName   string
+	Namespace     string
+	NHDName       string
+	FailureReason string // e.g. "DeadlineExceeded", "AgentUnreachable", "BadRequest"
+	FailureDetail string // structured error message; surfaced verbatim
+	Attempts      int    // 1 if first attempt failed terminally; 2 after the retry burned
 }
 
 // BuildApplied returns the Slack JSON payload for a gate-pass +
@@ -161,6 +175,60 @@ func BuildHumanInLoop(in HumanInLoopInput) ([]byte, error) {
 			Type: "section",
 			Text: &slackText{Type: "mrkdwn", Text: "*Audit log:* " + auditURL},
 		})
+	}
+
+	return json.Marshal(msg)
+}
+
+// BuildCritical returns the Slack JSON payload for a case that ended
+// in terminal `Failed` after the FR-7 retry-once arm exhausted.
+// Distinct from `Applied` and `HumanInLoop` so on-call can tell at a
+// glance that the controller is "stuck" rather than silent: the
+// header literally says AGENT FAILED, the action field reports the
+// node was NOT cordoned, and the failure reason + detail surface
+// verbatim. Per spec FR-9 this message uses a `severity=critical`
+// framing — Slack incoming webhooks have no severity field, so the
+// distinct text + Action: NOT cordoned line carry that semantic.
+func BuildCritical(in CriticalInput) ([]byte, error) {
+	if in.NodeName == "" {
+		return nil, fmt.Errorf("BuildCritical: NodeName is required")
+	}
+	if in.FailureReason == "" {
+		return nil, fmt.Errorf("BuildCritical: FailureReason is required")
+	}
+
+	header := fmt.Sprintf("NodeMedic: %s – AGENT FAILED", in.NodeName)
+	attempts := in.Attempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	attemptsLine := fmt.Sprintf("after %d attempt(s) — controller-level retry-once already burned", attempts)
+
+	detail := in.FailureDetail
+	if detail == "" {
+		detail = "(no detail recorded)"
+	}
+
+	kubectlBlock := fmt.Sprintf(
+		"```\nkubectl --context=%s -n %s get nhd %s -o yaml\n```",
+		in.ClusterName, fallback(in.Namespace, "cf-monitoring"), in.NHDName,
+	)
+
+	msg := slackEnvelope{
+		Text: header,
+		Blocks: []slackBlock{
+			{Type: "header", Text: &slackText{Type: "plain_text", Text: header}},
+			{
+				Type: "section",
+				Fields: []slackText{
+					{Type: "mrkdwn", Text: "*Cluster:* " + in.ClusterName},
+					{Type: "mrkdwn", Text: "*Action:* NOT cordoned — agent never produced a usable diagnosis"},
+				},
+			},
+			{Type: "section", Text: &slackText{Type: "mrkdwn", Text: fmt.Sprintf("*Failure:* `%s` %s", in.FailureReason, attemptsLine)}},
+			{Type: "section", Text: &slackText{Type: "mrkdwn", Text: "*Detail:* " + detail}},
+			{Type: "section", Text: &slackText{Type: "mrkdwn", Text: "*Inspect:*\n" + kubectlBlock}},
+		},
 	}
 
 	return json.Marshal(msg)

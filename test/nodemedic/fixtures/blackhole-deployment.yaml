@@ -1,0 +1,108 @@
+# Black-hole agent stub for the gate-fail-via-agent-timeout demo path
+# (spec AC-5 / quickstart Scenario C).
+#
+# Drops in a tiny nginx that responds 202 to every POST and then never
+# writes anything to the apiserver. The controller's POST /diagnose
+# succeeds, the NHD goes to phase=Diagnosing, and the deadline-retry
+# arm fires:
+#   1st miss → bump retry-count to 1, push deadline forward, re-POST
+#   2nd miss → terminal Failed + Critical Slack
+#
+# Apply:
+#   kubectl --context=cf1z apply -f test/nodemedic/fixtures/blackhole-deployment.yaml
+#
+# Then point the controller at the black-hole service (helm upgrade
+# --set config.agentURL=http://blackhole-agent.cf-monitoring.svc:8080/diagnose)
+# and inject a fault to start a case.
+#
+# Cleanup:
+#   kubectl --context=cf1z delete -f test/nodemedic/fixtures/blackhole-deployment.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blackhole-agent-config
+  namespace: cf-monitoring
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      access_log /dev/stdout;
+      location / {
+        default_type application/json;
+        return 202 '{"caseId":"blackhole","status":"queued"}';
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blackhole-agent
+  namespace: cf-monitoring
+  labels:
+    app: blackhole-agent
+    nodemedic.cf.newrelic.com/role: agent-stub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: blackhole-agent
+  template:
+    metadata:
+      labels:
+        app: blackhole-agent
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: nginx
+          image: cf-registry.nr-ops.net/docker.io/library/nginx:1-alpine
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/conf.d
+            - name: cache
+              mountPath: /var/cache/nginx
+            - name: run
+              mountPath: /var/run
+          securityContext:
+            runAsUser: 101
+            runAsGroup: 101
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: config
+          configMap:
+            name: blackhole-agent-config
+        - name: cache
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blackhole-agent
+  namespace: cf-monitoring
+  labels:
+    app: blackhole-agent
+    nodemedic.cf.newrelic.com/role: agent-stub
+spec:
+  selector:
+    app: blackhole-agent
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

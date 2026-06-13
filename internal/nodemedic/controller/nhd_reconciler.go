@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -58,8 +59,42 @@ type NHDReconciler struct {
 	ClusterName        string
 	Namespace          string
 
+	// RetryDeadlineExtension is how much we push spec.budgets.deadline
+	// forward when retrying a DeadlineExceeded case. Default 60s in
+	// main.go; envtests override to a small value so the retry-then-
+	// terminal flow finishes quickly.
+	RetryDeadlineExtension time.Duration
+
 	// Now is injected for tests; defaults to time.Now in main.go.
 	Now func() time.Time
+}
+
+// RetryCountAnnotation tracks how many controller-level retries this
+// case has burned. FR-7 caps it at 1 — second hit goes terminal
+// `Failed` + Critical Slack. Storing on metadata.annotations makes
+// the count survive controller restarts (FR-11 idempotency edge).
+const RetryCountAnnotation = "nodemedic.cf.newrelic.com/retry-count"
+
+// retryDeadlineExtensionDefault is what main.go uses if Reconciler is
+// constructed without an explicit RetryDeadlineExtension. Spec FR-3
+// sets the original deadline at observedAt+60s; we mirror that on
+// retry.
+const retryDeadlineExtensionDefault = 60 * time.Second
+
+// getRetryCount reads the annotation; missing or malformed → 0.
+func getRetryCount(nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI) int {
+	if nhd.Annotations == nil {
+		return 0
+	}
+	v := nhd.Annotations[RetryCountAnnotation]
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // SetupWithManager registers this reconciler against NHD CRs.
@@ -102,11 +137,11 @@ func (r *NHDReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return r.invokeAgent(ctx, logger, &nhd)
 
 	case nodemedicv1alpha1.PhaseDiagnosing:
-		// Past deadline → fail. Phase 5 will add the retry-once arm.
 		if d := nhd.Spec.Budgets.Deadline; d != nil && now.After(d.Time) {
-			logger.Info("deadline exceeded; marking Failed", "deadline", d.Time, "now", now)
-			return r.markFailed(ctx, &nhd, "DeadlineExceeded",
-				fmt.Sprintf("agent did not write phase=Diagnosed before deadline %s", d.Time))
+			logger.Info("deadline exceeded",
+				"deadline", d.Time, "now", now,
+				"retryCount", getRetryCount(&nhd))
+			return r.handleDeadlineExceeded(ctx, &nhd)
 		}
 		return ctrl.Result{RequeueAfter: requeueDuringDiagnosis}, nil
 
@@ -160,19 +195,19 @@ func (r *NHDReconciler) invokeAgent(
 	resp, attErr := r.Agent.Diagnose(ctx, req)
 	if attErr != nil {
 		metrics.AgentPostTotal.WithLabelValues(attErr.Class.String()).Inc()
-		// 400/401/Other are terminal Failed.
 		switch attErr.Class {
 		case agentclient.ResultBadRequest:
-			return r.markFailed(ctx, nhd, "BadRequest", attErr.Error())
+			// Malformed request — retrying won't help. Terminal Critical.
+			return r.criticalFailure(ctx, nhd, "BadRequest", attErr.Error())
 		case agentclient.ResultUnauthorized:
-			return r.markFailed(ctx, nhd, "Unauthorized", attErr.Error())
+			// Bad token — same; rotating mid-reconcile is out of scope.
+			return r.criticalFailure(ctx, nhd, "Unauthorized", attErr.Error())
 		case agentclient.ResultRetry, agentclient.ResultServer, agentclient.ResultTimeout:
-			// Final-attempt failure after retries. Phase 5 (US3) treats
-			// this as Failed with a single retry; for US1 we just go
-			// terminal Failed.
-			return r.markFailed(ctx, nhd, "AgentUnreachable", attErr.Error())
+			// Retry-eligible (FR-7). Burn the controller-level retry
+			// once; on a second hit go terminal Critical.
+			return r.handleAgentUnreachable(ctx, nhd, attErr)
 		default:
-			return r.markFailed(ctx, nhd, "AgentError", attErr.Error())
+			return r.criticalFailure(ctx, nhd, "AgentError", attErr.Error())
 		}
 	}
 	logger.Info("agent accepted POST /diagnose", "status", resp.Status, "caseId", resp.CaseId)
@@ -341,6 +376,130 @@ func (r *NHDReconciler) humanInLoopPath(
 	r.Recorder.Eventf(nhd, corev1.EventTypeNormal, "PhaseTransition",
 		"%s -> Acted (HumanInLoop)", nodemedicv1alpha1.PhaseDiagnosed)
 	return ctrl.Result{}, nil
+}
+
+// handleDeadlineExceeded implements FR-7 deadline retry-once. First
+// hit: bump retry-count, push spec.budgets.deadline forward, re-issue
+// POST /diagnose. Second hit (retry-count >= 1): terminal Critical.
+func (r *NHDReconciler) handleDeadlineExceeded(
+	ctx context.Context,
+	nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI,
+) (ctrl.Result, error) {
+	if getRetryCount(nhd) >= 1 {
+		var deadlineStr string
+		if d := nhd.Spec.Budgets.Deadline; d != nil {
+			deadlineStr = d.Time.UTC().Format(time.RFC3339)
+		}
+		return r.criticalFailure(ctx, nhd, "DeadlineExceeded",
+			fmt.Sprintf("agent did not write phase=Diagnosed before retried deadline %s", deadlineStr))
+	}
+
+	// First miss: bump annotation + push deadline forward.
+	if err := r.bumpRetryAnnotation(ctx, nhd, 1); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.extendDeadline(ctx, nhd); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "RetryTriggered",
+		"DeadlineExceeded; retrying POST /diagnose with same caseId=%s", nhd.Spec.Case.CaseId)
+
+	// Re-issue. invokeAgent will write AgentInvoked condition and put
+	// us back in Diagnosing — or escalate if even the retry fails.
+	return r.invokeAgent(ctx, log.FromContext(ctx).WithName("retry"), nhd)
+}
+
+// handleAgentUnreachable implements FR-7 AgentUnreachable retry-once.
+// Bumps retry-count immediately and asks the workqueue to requeue;
+// on the next reconcile the agent client gets called again. If it
+// fails a second time we land here with retry-count==1 and go
+// terminal Critical.
+func (r *NHDReconciler) handleAgentUnreachable(
+	ctx context.Context,
+	nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI,
+	attErr *agentclient.AttemptError,
+) (ctrl.Result, error) {
+	if getRetryCount(nhd) >= 1 {
+		return r.criticalFailure(ctx, nhd, "AgentUnreachable", attErr.Error())
+	}
+	if err := r.bumpRetryAnnotation(ctx, nhd, 1); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "RetryTriggered",
+		"AgentUnreachable (%s); retrying POST /diagnose", attErr.Class)
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// extendDeadline patches spec.budgets.deadline forward by
+// RetryDeadlineExtension (default 60s). Spec mutation is bounded to
+// one call per case per FR-7's retry-once cap.
+func (r *NHDReconciler) extendDeadline(
+	ctx context.Context,
+	nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI,
+) error {
+	ext := r.RetryDeadlineExtension
+	if ext <= 0 {
+		ext = retryDeadlineExtensionDefault
+	}
+	patchBase := nhd.DeepCopy()
+	newDeadline := metav1.NewTime(r.now().Add(ext))
+	nhd.Spec.Budgets.Deadline = &newDeadline
+	return r.Patch(ctx, nhd, client.MergeFrom(patchBase))
+}
+
+// bumpRetryAnnotation patches metadata.annotations to record the new
+// retry-count. Idempotent; if the annotation already equals `to` it's
+// a no-op patch (controller-runtime skips empty patches).
+func (r *NHDReconciler) bumpRetryAnnotation(
+	ctx context.Context,
+	nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI,
+	to int,
+) error {
+	patchBase := nhd.DeepCopy()
+	if nhd.Annotations == nil {
+		nhd.Annotations = map[string]string{}
+	}
+	nhd.Annotations[RetryCountAnnotation] = strconv.Itoa(to)
+	return r.Patch(ctx, nhd, client.MergeFrom(patchBase))
+}
+
+// criticalFailure marks the NHD terminally Failed and posts a
+// Critical Slack message. Best-effort on the Slack post; status is
+// always written so the case is auditable in `kubectl get nhd`.
+func (r *NHDReconciler) criticalFailure(
+	ctx context.Context,
+	nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI,
+	reason, detail string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	attempts := getRetryCount(nhd) + 1 // burn-count +1 for the final
+	payload, buildErr := notifier.BuildCritical(notifier.CriticalInput{
+		NodeName:      nhd.Spec.Case.NodeName,
+		ClusterName:   nhd.Spec.Case.ClusterName,
+		Namespace:     nhd.Namespace,
+		NHDName:       nhd.Name,
+		FailureReason: reason,
+		FailureDetail: detail,
+		Attempts:      attempts,
+	})
+	if buildErr != nil {
+		r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "NotifierFailed",
+			"BuildCritical: %v", buildErr)
+	} else {
+		res := r.Slack.Post(ctx, payload)
+		if res.Posted {
+			metrics.SlackPostTotal.WithLabelValues(metrics.SlackKindCritical, metrics.SlackResultOK).Inc()
+		} else {
+			metrics.SlackPostTotal.WithLabelValues(metrics.SlackKindCritical, metrics.SlackResultErr).Inc()
+			r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "NotifierFailed",
+				"slack post (Critical) failed after %d attempts: %v", res.Attempts, res.LastErr)
+		}
+	}
+	logger.Error(errors.New(reason), "terminal Critical", "detail", detail)
+
+	return r.markFailed(ctx, nhd, reason, detail)
 }
 
 func (r *NHDReconciler) markFailed(ctx context.Context, nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI, reason, message string) (ctrl.Result, error) {

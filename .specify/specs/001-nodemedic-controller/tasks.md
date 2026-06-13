@@ -161,16 +161,16 @@ description: "Task list for NodeMedic Controller (Scope 2 of AFA 2026 hackathon)
 
 ### Tests for User Story 3
 
-- [ ] T056 [P] [US3] Extend `internal/nodemedic/notifier/slack_test.go` — golden JSON for `BuildCritical(...)` includes `reason` and "AGENT FAILED" header
-- [ ] T057 [P] [US3] Author `test/nodemedic/envtest/reconciler_us3_test.go` — agent stub returns 202 then never updates the CR; envtest fast-forwards `time.Now` past deadline; assert: first `Failed{DeadlineExceeded}`, retry, second `Failed`, exactly one Critical Slack POST, `Node.spec.unschedulable` never set
+- [x] T056 [P] [US3] Extended `internal/nodemedic/notifier/slack_test.go` — `TestBuildCritical_Shape` walks decoded blocks, asserts `AGENT FAILED` header, `NOT cordoned` field, failure-reason verbatim, failure-detail verbatim, "after N attempt(s)" framing, kubectl block. Plus required-fields guards + default-attempts fallback.
+- [x] T057 [P] [US3] Authored `internal/nodemedic/controller/us3_envtest_test.go` (build-tag gated). Two cases: `TestUS3_DeadlineExceeded_RetriesOnce_ThenCritical` (silent agent → first deadline → retry → second deadline → terminal Critical) and `TestUS3_AgentUnreachable_RetriesOnce_ThenCritical` (flaky agent returning Timeout twice → retry → terminal Critical). Both assert: Node never cordoned, retry-count annotation == 1, AgentInvoked=False with the right Reason, exactly one Slack POST, agent called twice with the same caseId.
 
 ### Implementation for User Story 3
 
-- [ ] T058 [US3] Add `BuildCritical(nhd, failureReason) []byte` to `internal/nodemedic/notifier/messages.go`
-- [ ] T059 [US3] Extend `internal/nodemedic/controller/nhd_reconciler.go` `Diagnosing` arm — when `now > spec.budgets.deadline`: set `Failed{reason=DeadlineExceeded}`, increment a per-NHD retry annotation (`nodemedic.cf.newrelic.com/retry-count`); if annotation < 1, re-issue `POST /diagnose` with the same `caseId` and bump annotation; if = 1, set terminal `Failed` and call `Slack.Post(BuildCritical(...))`
-- [ ] T060 [US3] Add per-NHD `retry-count` annotation handling to status updater so it survives controller restarts (FR-11 idempotency edge)
-- [ ] T061 [US3] Add a small black-hole HTTP service definition to `test/nodemedic/fixtures/blackhole-deployment.yaml` (returns `202` then sleeps); referenced by quickstart Scenario C
-- [ ] T062 [US3] Run [`quickstart.md`](./quickstart.md) Scenario C on `test-odd-wire`; verify AC-5
+- [x] T058 [US3] Added `BuildCritical(CriticalInput) []byte` to `internal/nodemedic/notifier/messages.go`. Distinct from Applied / HumanInLoop: header literally says `AGENT FAILED`, action field reads `NOT cordoned — agent never produced a usable diagnosis`, failure reason + detail surface verbatim, "after N attempt(s)" framing names the retry-once burn.
+- [x] T059 [US3] Extended `nhd_reconciler.go` Diagnosing arm — `handleDeadlineExceeded` checks the retry-count annotation: 0 → bump to 1, push `spec.budgets.deadline` forward by `RetryDeadlineExtension` (default 60s), re-issue `invokeAgent`; ≥1 → terminal Critical via `criticalFailure` helper. Also extended invokeAgent's error handling: 400/401 go terminal Critical immediately; 429/5xx/timeout route through new `handleAgentUnreachable` which mirrors the same retry-once → terminal pattern.
+- [x] T060 [US3] `RetryCountAnnotation` (`nodemedic.cf.newrelic.com/retry-count`) lives on `metadata.annotations` so it survives controller restarts (FR-11). `getRetryCount` + `bumpRetryAnnotation` helpers; `extendDeadline` is the only spec-mutation post-Create the controller does, bounded to one call per case by the retry-once cap.
+- [x] T061 [US3] Authored `test/nodemedic/fixtures/blackhole-deployment.yaml` — nginx ConfigMap returning `202 {"caseId":"blackhole","status":"queued"}` for every request, plus the Deployment + Service. Targets cf-monitoring, uses cf-registry.nr-ops.net/docker.io/library/nginx:1-alpine. Apply + point `--agent-url` at `blackhole-agent.cf-monitoring.svc:8080/diagnose` to drive Scenario C.
+- [ ] T062 [US3] **MANUAL — runs at hackathon time on real cluster.** Apply the black-hole Deployment to cf1z, redeploy the controller pointing at it, inject a fault, and verify: NHD reaches `phase=Failed`, `nodemedic.cf.newrelic.com/retry-count: "1"` annotation set, AgentInvoked condition has `reason=DeadlineExceeded` and "retried deadline" message, Slack channel sees the Critical post, Node never cordoned. Verifies AC-5.
 
 **Checkpoint**: AC-5 green. Agent-failure demo path works.
 
