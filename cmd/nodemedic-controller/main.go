@@ -68,6 +68,12 @@ type options struct {
 	debounceWindow     time.Duration
 	metricsAddr        string
 	probeAddr          string
+	// stubAgent short-circuits POST /diagnose: every call is treated
+	// as 202 `queued` without touching the network. Demo helper for
+	// when Scope 3's agent service isn't deployed yet — the operator
+	// hand-patches status.diagnosis via `kubectl apply --subresource=status`
+	// to drive the gate / cordon path. NEVER set in production.
+	stubAgent bool
 }
 
 func main() {
@@ -137,7 +143,7 @@ func run() error {
 	// startup if a Secret-mounted env var is missing rather than
 	// discover it mid-reconcile.
 	agentToken := os.Getenv("NODEMEDIC_AGENT_TOKEN")
-	if agentToken == "" {
+	if agentToken == "" && !opts.stubAgent {
 		klog.Info("WARNING: NODEMEDIC_AGENT_TOKEN env is empty; agent calls will likely 401")
 	}
 	slackWebhook := os.Getenv("NODEMEDIC_SLACK_WEBHOOK_URL")
@@ -145,7 +151,13 @@ func run() error {
 		klog.Info("WARNING: NODEMEDIC_SLACK_WEBHOOK_URL env is empty; Slack posts will fail")
 	}
 
-	agentCli := agentclient.New(opts.agentURL, agentToken)
+	var agentCli controller.AgentClient
+	if opts.stubAgent {
+		klog.Info("--stub-agent=true; bypassing real agent service. NOT FOR PRODUCTION.")
+		agentCli = &agentclient.StubAgent{}
+	} else {
+		agentCli = agentclient.New(opts.agentURL, agentToken)
+	}
 	slackCli := notifier.NewSlack(slackWebhook)
 
 	nhdRec := &controller.NHDReconciler{
@@ -220,6 +232,12 @@ func parseFlags() options {
 		"address on which the metrics endpoint binds")
 	fs.StringVar(&opts.probeAddr, "health-probe-bind-address", ":8081",
 		"address on which the healthz/readyz endpoints bind")
+
+	fs.BoolVar(&opts.stubAgent, "stub-agent", false,
+		"DEMO HELPER ONLY: bypass POST /diagnose; pretend every call returns 202 queued. "+
+			"Use while Scope 3's agent isn't deployed; hand-patch status.diagnosis "+
+			"via `kubectl apply --subresource=status` to drive the gate path. "+
+			"NEVER set in production.")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		// flag.ExitOnError already calls os.Exit(2) on parse failure;

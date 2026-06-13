@@ -33,6 +33,12 @@ config:
   agentURL: "http://nodemedic-agent.cf-monitoring.svc:8080/diagnose"
   # Per (node, condition) debounce window for trigger detection (FR-1).
   debounceWindow: "30s"
+  # DEMO HELPER ONLY. When true, the controller bypasses the agent
+  # service and pretends every POST /diagnose returns 202 queued.
+  # Use while Scope 3's agent isn't deployed; hand-patch
+  # status.diagnosis via `kubectl apply --subresource=status` to
+  # drive the gate path. NEVER set in production.
+  stubAgent: false
 
 # Secrets the controller mounts as env vars. The Secrets MUST be
 # created out-of-band before installing the chart; the chart only

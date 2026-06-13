@@ -32,6 +32,9 @@ spec:
             - "--debounce-window={{ .Values.config.debounceWindow }}"
             - "--metrics-bind-address=:{{ .Values.service.metricsPort }}"
             - "--health-probe-bind-address=:{{ .Values.service.probePort }}"
+            {{- if .Values.config.stubAgent }}
+            - "--stub-agent"
+            {{- end }}
           env:
             - name: NODEMEDIC_AGENT_TOKEN
               valueFrom:
