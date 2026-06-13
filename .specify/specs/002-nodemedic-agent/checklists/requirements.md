@@ -2,7 +2,7 @@
 
 **Purpose**: Validate specification completeness and quality before proceeding to planning
 **Created**: 2026-06-12
-**Updated:** 2026-06-12 — for spec v0.2 alignment to constitution v2.0
+**Last refresh**: 2026-06-12 (post spec-kit-specify iteration; pre `/speckit-plan`)
 **Feature**: [spec.md](../spec.md)
 
 ## Content Quality
@@ -34,36 +34,42 @@
 
 ### Spec convention deviates from base template (intentional)
 
-This spec matches the structural shape of `001-nodemedic-controller/spec.md` rather than the bare `spec-template.md` skeleton. That convention is established in this repo (constitution explicitly anchors specs to `nodemedic-scope.md` and the diagrams) and was confirmed with the user before authoring v0.1.
+This spec matches the structural shape of `001-nodemedic-controller/spec.md` rather than the bare `spec-template.md` skeleton. That convention is established in this repo (the constitution explicitly anchors specs to `nodemedic-scope.md` and the diagrams) and was confirmed with the user before authoring.
 
 ### "No implementation details" — what's named is contract, not implementation
 
-The agent spec deliberately names specific tools (`Bash`, NR HTTP MCP, `kubectl`, `aws`, `az`, `ssh`, `emit_report`), specific model IDs (`claude-opus-4-7`, `claude-sonnet-4-6`), and specific SDK constructs (`ClaudeSDKClient`, `permission_mode`, `PreToolUse` hook). Treating these as "implementation" would dissolve the safety surface the constitution depends on:
+The agent spec deliberately names specific tools (`Bash`, NR HTTP MCP, `kubectl`, `aws`, `az`, `ssh`, `emit_report`), specific model identifiers (`claude-opus-4-7`, `claude-sonnet-4-6`), specific SDK constructs (`ClaudeSDKClient`, `permission_mode`, `PreToolUse` hook), and specific env-var conventions (`ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` for the nerd-completion gateway). Treating these as "implementation" would dissolve the safety surface and the cross-scope contracts the spec depends on:
 
-- The tool surface IS the contract — Constitution v2.0 Article I.4 (audit) and the FR-13 credential-layer verification both reference what tools exist.
-- The model IDs are bound by Constitution Article III.1 (cite, don't claim) — picking a different model is a spec change, not an implementation choice.
-- `permission_mode = "bypassPermissions"` is a relaxation explicitly enumerated in the constitution amendments log; substituting `default` would silently re-tighten the agent and trigger per-tool prompts that break the autonomous loop.
+- The tool surface IS the contract — Constitution Article I.4 (observability) and FR-9's stdout-log requirement both reference what tools exist.
+- The model identifiers are bound by Constitution Article III.1 (cite, don't claim) — picking a different model is a spec change, not an implementation choice.
+- `permission_mode = "bypassPermissions"` is a relaxation explicitly enumerated under Article I's "Hackathon-scope simplifications"; substituting `default` would silently re-tighten the agent and trigger per-tool prompts that break the autonomous loop.
+- The nerd-completion env-var convention reuses Nova's `nova-service` Vault path — naming it specifically is what makes the manifest under `manifests/secret-anthropic-token.yaml` actionable on Day 1.
 
-### v0.2 alignment to constitution v2.0
+### Hackathon-scope simplifications are bound by the constitution
 
-This spec was rewritten on 2026-06-12 to reflect the constitution v2.0 amendment, which relaxed four v1.0 requirements for the hackathon scope:
-- Removed the structured tool allow-list / `can_use_tool` two-layer enforcement (was G4 + FR-5 + FR-13 unit tests).
-- Removed the SSH command prefix-match (was Article I.5).
-- Removed `permission_mode = default` requirement (was Article I.6).
-- Removed per-case `max_turns` and `max_budget_usd` enforcement (was G8 + FR-7).
+The spec defers seven controls vs. the production posture, each backed by Article I of the constitution and the corresponding entry on the "Production hardening" list:
 
-Credential-layer least privilege (FR-14 kube RBAC + IRSA / Azure RBAC / NR token scope) is now the primary safety boundary, with FR-13 verifying it on every install. The wall-clock `deadline` (FR-7) is the only hard loop ceiling.
+1. No structured tool allow-list (FR-4 raw `Bash` + NR MCP).
+2. No SSH command prefix-match (FR-16).
+3. `permission_mode = "bypassPermissions"` (FR-3).
+4. No agent-side termination ceiling — no `max_turns`, no `max_budget_usd`, no wall-clock `deadline` (FR-7).
+5. No `emit_report` agent-side evidence-count gate (FR-8 step 2).
+6. No durable audit JSONL — stdout structured logs only (NFR-3, FR-9 removed).
+7. No programmatic credential-layer verification job (FR-13 deferred; verification is by captain chart-review).
 
-All four relaxations are tracked as P0 follow-ups in the constitution amendments log and MUST be reverted before production rollout.
+Plus two integration-shape decisions that are not relaxations but were resolved during spec authoring:
 
-### v0.2 dropped latency hard targets
+- No `/diagnose` authentication (FR-1) — ClusterIP-only Service on a non-production cluster.
+- Agent runs as an independent Deployment + Service in the same cluster as the controller, not as a sidecar and not on `interlinked` (FR-15 / G11).
 
-Per user direction (2026-06-12), the agent's `POST /diagnose` is async — the controller doesn't block on diagnosis duration, the CR informer surfaces results whenever they land. NFR-1 in v0.2 reframes prior latency contracts as informational soft targets. Diagnosis time is bounded only by the per-case `deadline`. AC-3 was reworded from "within 60 s" to "before deadline elapses" with the demo-shape note retained for context.
+### Latency is informational, not contracted
 
-### v0.2 deployment topology clarification
+The agent's `POST /diagnose` is async. NFR-1 frames its latency targets as observability soft targets, not as gate conditions for `Failed`/`Acted`. The controller's deadline (Spec 001 FR-5) bounds *user-visible* case duration; FR-12 governs the late-write race when the agent finishes after the controller has given up.
 
-Per user direction (2026-06-12), G11 was rewritten: agent runs as an **independent Deployment + Service** in the same cluster as the controller — not as a sidecar in the controller's pod, not on `interlinked`. Independent RBAC, lifecycle, restart, and rollout. The controller reaches the agent over the in-cluster Service. v0.1 used "sidecar" loosely; v0.2 fixes the terminology.
+### Open questions in §10 are plan-phase, not spec-phase
 
-### Open questions in §10 are plan-phase, not scope-phase
+§10 captures eight items — five closed (Anthropic auth via nerd-completion, Azure auth via SP, SSH key provisioning, Slack audit-log button drop, PVC sizing) and three remaining (NR MCP rate-limit stability, runbook prompt caching across model swap, CLI version pinning). None of the open three block the spec from being ready for `/speckit-plan`; they're plan-phase concerns by their nature.
 
-§10 captures 8 plan-phase concerns (Anthropic key sourcing, NR MCP rate limits, Azure auth mechanism, SSH keypair owner, Slack link target, model-fallback cache asymmetry, PVC sizing, CLI versioning). None block the spec from being ready for `/speckit-plan`.
+### Ready for `/speckit-plan`
+
+All checklist items pass. Spec is internally consistent across G/FR/NFR/AC numbering. Constitution alignment verified. The next phase is implementation planning — the spec defines *what* the agent does and *why*; the plan will define *how* it gets built.
