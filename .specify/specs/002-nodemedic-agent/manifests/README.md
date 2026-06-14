@@ -11,9 +11,13 @@ The agent reaches Claude via New Relic's internal **nerd-completion gateway**, n
 
 The Claude Agent SDK respects both env vars natively. No code changes vs. the public-API path.
 
+## Image path
+
+Agent images live at **`cf-registry.nr-ops.net/container-fabric/nodemedic-agent`** (per Clarifications, mirrors the controller's `cf-registry.nr-ops.net/container-fabric/nodemedic-controller` path). Tag convention `dev-cf1z-<short-sha>` matches the agent repo branch HEAD at build time. cf1z's worker nodes are amd64 only; `linux/amd64` is the only platform that needs to be built today (arm64 dev hosts cross-compile cleanly via `--platform=$BUILDPLATFORM` in the Dockerfile). Push works with developer cf-registry credentials — no CI service account required.
+
 ## Prerequisites
 
-- Namespace `container-fabric` exists on the target cluster.
+- Namespace `cf-monitoring` exists on the target cluster.
 - nerd-completion token retrievable from Vault. Path: `containers/teams/nova/staging/nova-service/NERD_COMPLETION_API_TOKEN` (reusing Nova's `nova-service` path for the hackathon — same path `nova/k8s-agent-claude-sdk` uses). Container Fabric will register its own nerd-completion service path post-hackathon as part of production rollout. Retrieve via: `newrelic-vault us read -field=value containers/teams/nova/staging/nova-service/NERD_COMPLETION_API_TOKEN`.
 - For AWS-cluster installs: an IAM role configured for IRSA, with `ec2:DescribeInstanceStatus` / `ec2:DescribeInstances` / `health:DescribeEvents` on the cluster's region. Trust policy bound to the agent's ServiceAccount per [EKS IRSA docs](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html). **No `bedrock:*` permissions needed** — Claude auth doesn't go through Bedrock.
 - For Azure-cluster installs: a Service Principal with **Reader** on the cluster's resource group. Tenant/client/secret available out-of-band.
@@ -54,4 +58,4 @@ Patch placeholder values (`<...>`) before applying. The placeholders are deliber
 
 ## Rotation
 
-For the hackathon, rotation is by re-applying these manifests with new values and rolling the agent Deployment (`kubectl rollout restart deployment/nodemedic-agent -n container-fabric`). Production rotation will move to External Secrets / sealed-secrets per the constitution's "Production hardening" list.
+For the hackathon, rotation is by re-applying these manifests with new values and rolling the agent Deployment (`kubectl rollout restart deployment/nodemedic-agent -n cf-monitoring`). Production rotation will move to External Secrets / sealed-secrets per the constitution's "Production hardening" list.
