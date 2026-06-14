@@ -47,7 +47,7 @@ Entities below map 1:1 to a Python module in `nodemedic_agent/...` per the plan'
 | `spec.case.trigger.{type,reason,message,observedAt}` | User-prompt injection |
 | `spec.budgets.maxTurns` | Echoed best-effort into `status.diagnosis.turnsUsed`; NOT enforced (FR-7) |
 | `spec.budgets.maxBudgetUSD` | Echoed best-effort into `status.diagnosis.costUSD`; NOT enforced (FR-7) |
-| `spec.budgets.deadline` | Logged at INFO at case start; NOT enforced (FR-7) |
+| `spec.budgets.deadlineSec` | Logged at INFO at case start; NOT enforced (FR-7) |
 | `status.phase` | FR-12 phase-conflict pre-write check (`Diagnosed`/`Acted`/`Failed` → defer write) |
 
 ### 1.3 Phase machine writes the agent participates in
@@ -246,13 +246,20 @@ class ToolCallLog(BaseModel):
 class CaseCompleteLog(BaseModel):
     ts: datetime
     case_id: str
-    final_phase: Literal["Diagnosed", "Failed"]
-    failure_reason: Optional[str] = None
+    write_outcome: Literal["written", "deferred_phase_conflict", "write_failed"]
+    final_phase: Optional[Literal["Diagnosed", "Failed"]] = None  # what the agent attempted to write; None on deferred
+    observed_phase: Optional[str] = None  # populated on deferred_phase_conflict (e.g. "Failed", "Acted")
+    failure_reason: Optional[str] = None  # populated on write_failed and on agent-side Failed terminal states
     duration_ms: int
     model_resolved: str
     turns_used: Optional[int] = None
     cost_usd: Optional[str] = None
 ```
+
+Three terminal shapes:
+- **`written`** — happy path; `final_phase` is `Diagnosed` (success) or `Failed` (agent-side terminal, FR-11).
+- **`deferred_phase_conflict`** — FR-12 fired; `observed_phase` carries what the runner saw on the pre-write read (`Diagnosed`/`Acted`/`Failed`). `final_phase` is None because nothing was written.
+- **`write_failed`** — FR-8 retry exhausted or terminal class hit (`403`/`422`); `failure_reason` carries the apiserver error.
 
 Both shapes share `case_id` so `kubectl logs … | jq 'select(.case_id == "<id>")'` reconstructs the full reasoning chain (NFR-3 + AC-9).
 
