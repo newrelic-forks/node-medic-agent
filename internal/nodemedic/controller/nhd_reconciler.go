@@ -359,6 +359,16 @@ func (r *NHDReconciler) applyPath(
 			"build Applied Slack payload: %v", err)
 	} else {
 		res := r.Slack.Post(ctx, payload)
+		// FR-4 visibility: one structured record per Slack-post attempt.
+		// `block_kit` lets the cf1z gate (T033) confirm which builder
+		// took effect; `posted`/`attempts` are the post-mortem fields.
+		logger.Info("slack_post",
+			"event", "slack_post",
+			"kind", metrics.SlackKindApplied,
+			"block_kit", r.UseBlockKit,
+			"posted", res.Posted,
+			"attempts", res.Attempts,
+		)
 		if res.Posted {
 			metrics.SlackPostTotal.WithLabelValues(metrics.SlackKindApplied, metrics.SlackResultOK).Inc()
 		} else {
@@ -449,6 +459,13 @@ func (r *NHDReconciler) humanInLoopPath(
 			"build HumanInLoop Slack payload: %v", buildErr)
 	} else {
 		res := r.Slack.Post(ctx, payload)
+		logger.Info("slack_post",
+			"event", "slack_post",
+			"kind", metrics.SlackKindHumanInLoop,
+			"block_kit", r.UseBlockKit,
+			"posted", res.Posted,
+			"attempts", res.Attempts,
+		)
 		if res.Posted {
 			metrics.SlackPostTotal.WithLabelValues(metrics.SlackKindHumanInLoop, metrics.SlackResultOK).Inc()
 		} else {
@@ -617,6 +634,13 @@ func (r *NHDReconciler) criticalFailure(
 			"build Critical Slack payload: %v", buildErr)
 	} else {
 		postRes := r.Slack.Post(ctx, payload)
+		logger.Info("slack_post",
+			"event", "slack_post",
+			"kind", metrics.SlackKindCritical,
+			"block_kit", r.UseBlockKit,
+			"posted", postRes.Posted,
+			"attempts", postRes.Attempts,
+		)
 		if postRes.Posted {
 			metrics.SlackPostTotal.WithLabelValues(metrics.SlackKindCritical, metrics.SlackResultOK).Inc()
 		} else {

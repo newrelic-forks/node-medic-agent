@@ -19,12 +19,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	nodemedicv1alpha1 "k8s.io/node-problem-detector/api/v1alpha1"
 	"k8s.io/node-problem-detector/internal/nodemedic/notifier"
@@ -69,6 +71,81 @@ func (s *recordingSlack) last() []byte {
 		return nil
 	}
 	return s.payloads[len(s.payloads)-1]
+}
+
+// logRecord captures one Info-level log call so tests can assert the
+// FR-4 `slack_post` line was emitted at the call site with the right
+// fields.
+type logRecord struct {
+	msg    string
+	fields map[string]any
+}
+
+// logSink is a thread-safe logr sink that captures every Info call.
+// Wired into ctx via ctrllog.IntoContext so the reconciler's
+// `log.FromContext(ctx)` picks it up — no production code changes
+// needed.
+type logSink struct {
+	mu      sync.Mutex
+	records []logRecord
+}
+
+func newLogSink() *logSink { return &logSink{} }
+
+func (s *logSink) intoCtx(ctx context.Context) context.Context {
+	return ctrllog.IntoContext(ctx, logr.New(&captureSink{outer: s}))
+}
+
+func (s *logSink) all() []logRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]logRecord, len(s.records))
+	copy(out, s.records)
+	return out
+}
+
+// captureSink is a minimal logr.LogSink that records Info calls into
+// the parent logSink. We do not need WithName/WithValues fidelity for
+// these assertions — the reconciler's `slack_post` call passes all the
+// fields we care about as direct kvList args.
+type captureSink struct {
+	outer *logSink
+}
+
+func (c *captureSink) Init(logr.RuntimeInfo)          {}
+func (c *captureSink) Enabled(int) bool               { return true }
+func (c *captureSink) WithName(string) logr.LogSink   { return c }
+func (c *captureSink) WithValues(...any) logr.LogSink { return c }
+
+func (c *captureSink) Info(_ int, msg string, kvList ...any) {
+	rec := logRecord{msg: msg, fields: map[string]any{}}
+	for i := 0; i+1 < len(kvList); i += 2 {
+		key, _ := kvList[i].(string)
+		rec.fields[key] = kvList[i+1]
+	}
+	c.outer.mu.Lock()
+	defer c.outer.mu.Unlock()
+	c.outer.records = append(c.outer.records, rec)
+}
+
+func (c *captureSink) Error(error, string, ...any) {}
+
+// findSlackPost returns the (single expected) slack_post record from
+// the sink, or fails the test loudly. The reconciler emits exactly one
+// `slack_post` per terminal-phase Slack call.
+func (s *logSink) findSlackPost(t *testing.T) logRecord {
+	t.Helper()
+	var hits []logRecord
+	for _, r := range s.all() {
+		if r.msg == "slack_post" {
+			hits = append(hits, r)
+		}
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected exactly 1 slack_post log record, got %d (records=%+v)",
+			len(hits), s.all())
+	}
+	return hits[0]
 }
 
 // blockKitGolden parses the testdata file from notifier package so the
@@ -135,7 +212,7 @@ func headerText(t *testing.T, tree any) string {
 	return s
 }
 
-func reconcilerForBlockKitTest(t *testing.T, useBlockKit bool, objs ...client.Object) (*NHDReconciler, *recordingSlack) {
+func reconcilerForBlockKitTest(t *testing.T, useBlockKit bool, objs ...client.Object) (*NHDReconciler, *recordingSlack, *logSink) {
 	t.Helper()
 	scheme := nhdScheme(t)
 	cli := fake.NewClientBuilder().
@@ -159,7 +236,29 @@ func reconcilerForBlockKitTest(t *testing.T, useBlockKit bool, objs ...client.Ob
 			return time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
 		},
 	}
-	return rec, slack
+	return rec, slack, newLogSink()
+}
+
+// assertSlackPostLog locks the FR-4 `slack_post` record shape: it must
+// be the only such record, the kind must match the call site, and
+// `block_kit` must reflect the reconciler's UseBlockKit field. The
+// cf1z gate (T033/T034) greps for `block_kit=true` from these lines
+// to confirm the new builder took effect.
+func assertSlackPostLog(t *testing.T, sink *logSink, wantKind string, wantBlockKit bool) {
+	t.Helper()
+	rec := sink.findSlackPost(t)
+	if got := rec.fields["event"]; got != "slack_post" {
+		t.Errorf("slack_post log: event field = %v, want %q", got, "slack_post")
+	}
+	if got := rec.fields["kind"]; got != wantKind {
+		t.Errorf("slack_post log: kind = %v, want %q", got, wantKind)
+	}
+	if got := rec.fields["block_kit"]; got != wantBlockKit {
+		t.Errorf("slack_post log: block_kit = %v, want %v", got, wantBlockKit)
+	}
+	if got := rec.fields["posted"]; got != true {
+		t.Errorf("slack_post log: posted = %v, want true", got)
+	}
 }
 
 // blockKitNHDApplied builds an NHD already in phase=Diagnosed with a
@@ -276,13 +375,13 @@ func TestApplyPath_UseBlockKitTrue_PostsBlockKitApplied(t *testing.T) {
 
 	nhd := blockKitNHDApplied()
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nhd.Spec.Case.NodeName}}
-	rec, slack := reconcilerForBlockKitTest(t, true, nhd, node)
+	rec, slack, sink := reconcilerForBlockKitTest(t, true, nhd, node)
 
 	gate := ConfidenceGate(nhd.Status.Diagnosis, rec.MinConfidence, rec.MinEvidenceSources)
 	if gate.Outcome != GatePass {
 		t.Fatalf("test fixture expected GatePass, got %s (%s)", gate.Outcome.String(), gate.Reason)
 	}
-	if _, err := rec.applyPath(context.Background(), nhd, gate); err != nil {
+	if _, err := rec.applyPath(sink.intoCtx(context.Background()), nhd, gate); err != nil {
 		t.Fatalf("applyPath: %v", err)
 	}
 
@@ -294,6 +393,7 @@ func TestApplyPath_UseBlockKitTrue_PostsBlockKitApplied(t *testing.T) {
 	if diff := cmp.Diff(wantTree, parsePayload(t, got)); diff != "" {
 		t.Fatalf("Block Kit Applied payload diverges from golden:\n%s", diff)
 	}
+	assertSlackPostLog(t, sink, "Applied", true)
 }
 
 func TestApplyPath_UseBlockKitFalse_PostsLegacyApplied(t *testing.T) {
@@ -301,13 +401,13 @@ func TestApplyPath_UseBlockKitFalse_PostsLegacyApplied(t *testing.T) {
 
 	nhd := blockKitNHDApplied()
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nhd.Spec.Case.NodeName}}
-	rec, slack := reconcilerForBlockKitTest(t, false, nhd, node)
+	rec, slack, sink := reconcilerForBlockKitTest(t, false, nhd, node)
 
 	gate := ConfidenceGate(nhd.Status.Diagnosis, rec.MinConfidence, rec.MinEvidenceSources)
 	if gate.Outcome != GatePass {
 		t.Fatalf("test fixture expected GatePass, got %s", gate.Outcome.String())
 	}
-	if _, err := rec.applyPath(context.Background(), nhd, gate); err != nil {
+	if _, err := rec.applyPath(sink.intoCtx(context.Background()), nhd, gate); err != nil {
 		t.Fatalf("applyPath: %v", err)
 	}
 
@@ -326,19 +426,20 @@ func TestApplyPath_UseBlockKitFalse_PostsLegacyApplied(t *testing.T) {
 	if h := headerText(t, tree); h == "" || h[:len("NodeMedic:")] != "NodeMedic:" {
 		t.Fatalf("legacy header should start with %q; got %q", "NodeMedic:", h)
 	}
+	assertSlackPostLog(t, sink, "Applied", false)
 }
 
 func TestHumanInLoopPath_UseBlockKitTrue_PostsBlockKitHumanInLoop(t *testing.T) {
 	t.Parallel()
 
 	nhd := blockKitNHDHumanInLoop()
-	rec, slack := reconcilerForBlockKitTest(t, true, nhd)
+	rec, slack, sink := reconcilerForBlockKitTest(t, true, nhd)
 
 	gate := ConfidenceGate(nhd.Status.Diagnosis, rec.MinConfidence, rec.MinEvidenceSources)
 	if gate.Outcome == GatePass {
 		t.Fatalf("test fixture expected GateFail or GateSkip, got GatePass")
 	}
-	if _, err := rec.humanInLoopPath(context.Background(), nhd, gate); err != nil {
+	if _, err := rec.humanInLoopPath(sink.intoCtx(context.Background()), nhd, gate); err != nil {
 		t.Fatalf("humanInLoopPath: %v", err)
 	}
 
@@ -350,16 +451,17 @@ func TestHumanInLoopPath_UseBlockKitTrue_PostsBlockKitHumanInLoop(t *testing.T) 
 	if diff := cmp.Diff(wantTree, parsePayload(t, got)); diff != "" {
 		t.Fatalf("Block Kit HumanInLoop payload diverges from golden:\n%s", diff)
 	}
+	assertSlackPostLog(t, sink, "HumanInLoop", true)
 }
 
 func TestHumanInLoopPath_UseBlockKitFalse_PostsLegacyHumanInLoop(t *testing.T) {
 	t.Parallel()
 
 	nhd := blockKitNHDHumanInLoop()
-	rec, slack := reconcilerForBlockKitTest(t, false, nhd)
+	rec, slack, sink := reconcilerForBlockKitTest(t, false, nhd)
 
 	gate := ConfidenceGate(nhd.Status.Diagnosis, rec.MinConfidence, rec.MinEvidenceSources)
-	if _, err := rec.humanInLoopPath(context.Background(), nhd, gate); err != nil {
+	if _, err := rec.humanInLoopPath(sink.intoCtx(context.Background()), nhd, gate); err != nil {
 		t.Fatalf("humanInLoopPath: %v", err)
 	}
 
@@ -370,15 +472,16 @@ func TestHumanInLoopPath_UseBlockKitFalse_PostsLegacyHumanInLoop(t *testing.T) {
 	if h := headerText(t, parsePayload(t, got)); h == "" || h[:len("NodeMedic:")] != "NodeMedic:" {
 		t.Fatalf("legacy header should start with %q; got %q", "NodeMedic:", h)
 	}
+	assertSlackPostLog(t, sink, "HumanInLoop", false)
 }
 
 func TestCriticalFailure_UseBlockKitTrue_PostsBlockKitFailed(t *testing.T) {
 	t.Parallel()
 
 	nhd := blockKitNHDFailed()
-	rec, slack := reconcilerForBlockKitTest(t, true, nhd)
+	rec, slack, sink := reconcilerForBlockKitTest(t, true, nhd)
 
-	if _, err := rec.criticalFailure(context.Background(), nhd, "AgentUnreachable",
+	if _, err := rec.criticalFailure(sink.intoCtx(context.Background()), nhd, "AgentUnreachable",
 		"agent did not write phase=Diagnosed before retried deadline"); err != nil {
 		t.Fatalf("criticalFailure: %v", err)
 	}
@@ -391,15 +494,16 @@ func TestCriticalFailure_UseBlockKitTrue_PostsBlockKitFailed(t *testing.T) {
 	if diff := cmp.Diff(wantTree, parsePayload(t, got)); diff != "" {
 		t.Fatalf("Block Kit Failed payload diverges from golden:\n%s", diff)
 	}
+	assertSlackPostLog(t, sink, "Critical", true)
 }
 
 func TestCriticalFailure_UseBlockKitFalse_PostsLegacyCritical(t *testing.T) {
 	t.Parallel()
 
 	nhd := blockKitNHDFailed()
-	rec, slack := reconcilerForBlockKitTest(t, false, nhd)
+	rec, slack, sink := reconcilerForBlockKitTest(t, false, nhd)
 
-	if _, err := rec.criticalFailure(context.Background(), nhd, "AgentUnreachable",
+	if _, err := rec.criticalFailure(sink.intoCtx(context.Background()), nhd, "AgentUnreachable",
 		"agent did not write phase=Diagnosed before retried deadline"); err != nil {
 		t.Fatalf("criticalFailure: %v", err)
 	}
@@ -411,4 +515,5 @@ func TestCriticalFailure_UseBlockKitFalse_PostsLegacyCritical(t *testing.T) {
 	if h := headerText(t, parsePayload(t, got)); h == "" || h[:len("NodeMedic:")] != "NodeMedic:" {
 		t.Fatalf("legacy header should start with %q; got %q", "NodeMedic:", h)
 	}
+	assertSlackPostLog(t, sink, "Critical", false)
 }

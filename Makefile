@@ -385,9 +385,17 @@ depup: goget gomod
 # =============================================================================
 
 NODEMEDIC_BIN ?= bin/nodemedic-controller
-NODEMEDIC_IMG ?= ghcr.io/cf/nodemedic-controller:dev
+# Default repo matches what's actually deployed on cf1z so help-text and
+# build/push commands round-trip without the operator having to override.
+# Override with `make … NODEMEDIC_IMG=…` if pushing to a different repo.
+NODEMEDIC_IMG ?= cf-registry.nr-ops.net/container-fabric/nodemedic-controller
 NODEMEDIC_HELM_DIR ?= deployment/helm/nodemedic-controller
 NODEMEDIC_PKGS ?= ./api/... ./cmd/nodemedic-controller/... ./internal/nodemedic/...
+
+# TAG defaults to dev-cf1z-<shortsha>; override with `make … NODEMEDIC_TAG=…`.
+# Mirrors the agent and oncall-ui tag conventions so cf1z deploys are
+# reproducible from the commit SHA.
+NODEMEDIC_TAG ?= dev-cf1z-$(shell git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
 
 # Pinned tool versions. Updated together when we bump controller-runtime.
 CONTROLLER_TOOLS_VERSION ?= v0.16.5
@@ -406,7 +414,8 @@ nodemedic-help:
 	@echo "  nodemedic-manifests     run controller-gen crd+rbac (writes config/nodemedic/...)"
 	@echo "  nodemedic-test          go test ./api/... ./cmd/nodemedic-controller/... ./internal/nodemedic/..."
 	@echo "  nodemedic-envtest       run envtest-backed reconciler tests under test/nodemedic/envtest"
-	@echo "  nodemedic-docker-build  build Dockerfile.nodemedic-controller (multi-arch via buildx)"
+	@echo "  nodemedic-docker-build  build Dockerfile.nodemedic-controller -> $(NODEMEDIC_IMG):$(NODEMEDIC_TAG) (linux/amd64)"
+	@echo "  nodemedic-docker-push   docker push $(NODEMEDIC_IMG):$(NODEMEDIC_TAG)"
 	@echo "  nodemedic-helm-lint     helm lint $(NODEMEDIC_HELM_DIR)"
 	@echo "  nodemedic-helm-package  helm package $(NODEMEDIC_HELM_DIR)"
 	@echo "  nodemedic-clean         rm $(NODEMEDIC_BIN)"
@@ -457,12 +466,21 @@ nodemedic-envtest:
 	  go test -tags=integration -timeout=5m -count=1 ./internal/nodemedic/controller/...
 
 .PHONY: nodemedic-docker-build
+# cf1z runs amd64 nodes only — single-arch keeps the build fast and
+# matches the deployed reality. Mirrors the agent and oncall-ui targets.
+# `--load` puts the image into the local docker daemon so a subsequent
+# `nodemedic-docker-push` finds it.
 nodemedic-docker-build:
 	docker buildx build \
 	  -f Dockerfile.nodemedic-controller \
-	  --platform linux/amd64,linux/arm64 \
-	  -t $(NODEMEDIC_IMG) \
+	  --platform linux/amd64 \
+	  -t $(NODEMEDIC_IMG):$(NODEMEDIC_TAG) \
+	  --load \
 	  .
+
+.PHONY: nodemedic-docker-push
+nodemedic-docker-push:
+	docker push $(NODEMEDIC_IMG):$(NODEMEDIC_TAG)
 
 .PHONY: nodemedic-helm-lint
 nodemedic-helm-lint:

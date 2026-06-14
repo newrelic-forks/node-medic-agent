@@ -10,6 +10,7 @@ require (
 	github.com/avast/retry-go/v4 v4.7.0
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/euank/go-kmsg-parser v2.0.0+incompatible
+	github.com/go-logr/logr v1.4.3
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/hpcloud/tail v1.0.0
@@ -50,7 +51,6 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-kit/log v0.2.1 // indirect
 	github.com/go-logfmt/logfmt v0.5.1 // indirect
-	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-logr/zapr v1.3.0 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
