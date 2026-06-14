@@ -1,0 +1,32 @@
+{
+  "text": "Cordoned cf1z-general-nodes-1000007 in cf1z: Applied @ 0.92 — View full diagnosis: http://localhost:8080/cases/cf1z-general-nodes-1000007-1718374200",
+  "blocks": [
+    {
+      "type": "header",
+      "text": { "type": "plain_text", "text": "🚨 Cordoned: cf1z-general-nodes-1000007 (cf1z)" }
+    },
+    {
+      "type": "section",
+      "fields": [
+        { "type": "mrkdwn", "text": "*Decision:*\nApplied" },
+        { "type": "mrkdwn", "text": "*Confidence:*\n0.92" },
+        { "type": "mrkdwn", "text": "*Trigger:*\nKubeletUnhealthy" },
+        { "type": "mrkdwn", "text": "*rcaCategory:*\nKubelet" }
+      ]
+    },
+    {
+      "type": "actions",
+      "elements": [
+        {
+          "type": "button",
+          "style": "primary",
+          "text": { "type": "plain_text", "text": "View full diagnosis" },
+          "url": "http://localhost:8080/cases/cf1z-general-nodes-1000007-1718374200"
+        }
+      ]
+    }
+  ],
+  "attachments": [
+    { "color": "danger", "fallback": "Cordoned cf1z-general-nodes-1000007 in cf1z: Applied @ 0.92 — View full diagnosis: http://localhost:8080/cases/cf1z-general-nodes-1000007-1718374200" }
+  ]
+}

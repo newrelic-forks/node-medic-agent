@@ -10,6 +10,7 @@ require (
 	github.com/avast/retry-go/v4 v4.7.0
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/euank/go-kmsg-parser v2.0.0+incompatible
+	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/hpcloud/tail v1.0.0
 	github.com/prometheus/client_golang v1.23.2

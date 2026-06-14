@@ -47,7 +47,7 @@ type SlackNotifier interface {
 // manager; safe under controller-runtime's concurrent dispatch.
 type NHDReconciler struct {
 	client.Client
-	Scheme   any                   // kept for completeness; unused in v1
+	Scheme   any // kept for completeness; unused in v1
 	Recorder record.EventRecorder
 
 	Agent       AgentClient
@@ -64,6 +64,17 @@ type NHDReconciler struct {
 	// main.go; envtests override to a small value so the retry-then-
 	// terminal flow finishes quickly.
 	RetryDeadlineExtension time.Duration
+
+	// UseBlockKit selects the Slack message format for terminal-phase
+	// posts. true (default once Spec 003 ships) routes through the
+	// BuildBlockKit* builders; false falls back to the legacy
+	// BuildApplied/BuildHumanInLoop/BuildCritical builders. Set from
+	// --use-block-kit / USE_BLOCK_KIT in main.go.
+	UseBlockKit bool
+	// UIBaseURL is the base URL the Block Kit "View full diagnosis"
+	// button points at. Required when UseBlockKit is true. Set from
+	// --ui-base-url / UI_BASE_URL in main.go.
+	UIBaseURL string
 
 	// Now is injected for tests; defaults to time.Now in main.go.
 	Now func() time.Time
@@ -161,7 +172,10 @@ func (r *NHDReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 func (r *NHDReconciler) invokeAgent(
 	ctx context.Context,
-	logger interface{ Info(string, ...any); Error(error, string, ...any) },
+	logger interface {
+		Info(string, ...any)
+		Error(error, string, ...any)
+	},
 	nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI,
 ) (ctrl.Result, error) {
 	deadline := 60
@@ -314,17 +328,35 @@ func (r *NHDReconciler) applyPath(
 		return ctrl.Result{}, fmt.Errorf("status patch: %w", err)
 	}
 
-	// 3. Slack (winner only).
-	payload, err := notifier.BuildApplied(notifier.AppliedInput{
-		NodeName:    nhd.Spec.Case.NodeName,
-		ClusterName: nhd.Spec.Case.ClusterName,
-		Namespace:   nhd.Namespace,
-		NHDName:     nhd.Name,
-		Diagnosis:   nhd.Status.Diagnosis,
-	})
+	// 3. Slack (winner only). Block Kit vs. legacy is selected per the
+	// chart's config.useBlockKit flag (Spec 003 US1). The legacy
+	// BuildApplied path stays alive as the rollback target.
+	var (
+		payload []byte
+		err     error
+	)
+	if r.UseBlockKit {
+		payload, err = notifier.BuildBlockKitApplied(notifier.BlockKitInput{
+			NodeName:    nhd.Spec.Case.NodeName,
+			ClusterName: nhd.Spec.Case.ClusterName,
+			Namespace:   nhd.Namespace,
+			NHDName:     nhd.Name,
+			UIBaseURL:   r.UIBaseURL,
+			Trigger:     nhd.Spec.Case.Trigger.Type,
+			Diagnosis:   nhd.Status.Diagnosis,
+		})
+	} else {
+		payload, err = notifier.BuildApplied(notifier.AppliedInput{
+			NodeName:    nhd.Spec.Case.NodeName,
+			ClusterName: nhd.Spec.Case.ClusterName,
+			Namespace:   nhd.Namespace,
+			NHDName:     nhd.Name,
+			Diagnosis:   nhd.Status.Diagnosis,
+		})
+	}
 	if err != nil {
 		r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "NotifierFailed",
-			"BuildApplied: %v", err)
+			"build Applied Slack payload: %v", err)
 	} else {
 		res := r.Slack.Post(ctx, payload)
 		if res.Posted {
@@ -386,18 +418,35 @@ func (r *NHDReconciler) humanInLoopPath(
 		return ctrl.Result{}, fmt.Errorf("status patch: %w", err)
 	}
 
-	// 2. Slack (winner only).
-	payload, buildErr := notifier.BuildHumanInLoop(notifier.HumanInLoopInput{
-		NodeName:    nhd.Spec.Case.NodeName,
-		ClusterName: nhd.Spec.Case.ClusterName,
-		Namespace:   nhd.Namespace,
-		NHDName:     nhd.Name,
-		Diagnosis:   nhd.Status.Diagnosis,
-		GateReason:  gate.Reason,
-	})
+	// 2. Slack (winner only). Block Kit vs. legacy per Spec 003 US1.
+	var (
+		payload  []byte
+		buildErr error
+	)
+	if r.UseBlockKit {
+		payload, buildErr = notifier.BuildBlockKitHumanInLoop(notifier.BlockKitInput{
+			NodeName:    nhd.Spec.Case.NodeName,
+			ClusterName: nhd.Spec.Case.ClusterName,
+			Namespace:   nhd.Namespace,
+			NHDName:     nhd.Name,
+			UIBaseURL:   r.UIBaseURL,
+			Trigger:     nhd.Spec.Case.Trigger.Type,
+			Diagnosis:   nhd.Status.Diagnosis,
+			GateReason:  gate.Reason,
+		})
+	} else {
+		payload, buildErr = notifier.BuildHumanInLoop(notifier.HumanInLoopInput{
+			NodeName:    nhd.Spec.Case.NodeName,
+			ClusterName: nhd.Spec.Case.ClusterName,
+			Namespace:   nhd.Namespace,
+			NHDName:     nhd.Name,
+			Diagnosis:   nhd.Status.Diagnosis,
+			GateReason:  gate.Reason,
+		})
+	}
 	if buildErr != nil {
 		r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "NotifierFailed",
-			"BuildHumanInLoop: %v", buildErr)
+			"build HumanInLoop Slack payload: %v", buildErr)
 	} else {
 		res := r.Slack.Post(ctx, payload)
 		if res.Posted {
@@ -532,20 +581,40 @@ func (r *NHDReconciler) criticalFailure(
 		return res, nil
 	}
 
-	// Winner: post Critical Slack.
+	// Winner: post Critical Slack. Block Kit vs. legacy per Spec 003 US1.
 	attempts := getRetryCount(nhd) + 1 // burn-count +1 for the final
-	payload, buildErr := notifier.BuildCritical(notifier.CriticalInput{
-		NodeName:      nhd.Spec.Case.NodeName,
-		ClusterName:   nhd.Spec.Case.ClusterName,
-		Namespace:     nhd.Namespace,
-		NHDName:       nhd.Name,
-		FailureReason: reason,
-		FailureDetail: detail,
-		Attempts:      attempts,
-	})
+	var (
+		payload  []byte
+		buildErr error
+	)
+	if r.UseBlockKit {
+		payload, buildErr = notifier.BuildBlockKitFailed(notifier.BlockKitInput{
+			NodeName:    nhd.Spec.Case.NodeName,
+			ClusterName: nhd.Spec.Case.ClusterName,
+			Namespace:   nhd.Namespace,
+			NHDName:     nhd.Name,
+			UIBaseURL:   r.UIBaseURL,
+			Trigger:     nhd.Spec.Case.Trigger.Type,
+			Failure: &notifier.FailureView{
+				Reason:   reason,
+				Detail:   detail,
+				Attempts: attempts,
+			},
+		})
+	} else {
+		payload, buildErr = notifier.BuildCritical(notifier.CriticalInput{
+			NodeName:      nhd.Spec.Case.NodeName,
+			ClusterName:   nhd.Spec.Case.ClusterName,
+			Namespace:     nhd.Namespace,
+			NHDName:       nhd.Name,
+			FailureReason: reason,
+			FailureDetail: detail,
+			Attempts:      attempts,
+		})
+	}
 	if buildErr != nil {
 		r.Recorder.Eventf(nhd, corev1.EventTypeWarning, "NotifierFailed",
-			"BuildCritical: %v", buildErr)
+			"build Critical Slack payload: %v", buildErr)
 	} else {
 		postRes := r.Slack.Post(ctx, payload)
 		if postRes.Posted {

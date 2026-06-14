@@ -28,6 +28,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,6 +89,23 @@ type options struct {
 	// hand-patches status.diagnosis via `kubectl apply --subresource=status`
 	// to drive the gate / cordon path. NEVER set in production.
 	stubAgent bool
+	// useBlockKit selects the Slack message format. true (default once
+	// Spec 003 ships) routes terminal-phase posts through the
+	// BuildBlockKit* builders; false routes through the legacy
+	// BuildApplied/BuildHumanInLoop/BuildCritical builders. The
+	// legacy builders stay alive in messages.go as the demo-day
+	// rollback path. Helm value: config.useBlockKit. Env: USE_BLOCK_KIT.
+	useBlockKit bool
+	// uiBaseURL is the base URL the "View full diagnosis" Block Kit
+	// button points at. Default http://localhost:8080 matches the
+	// quickstart `kubectl port-forward` demo path. Helm value:
+	// config.uiBaseURL. Env: UI_BASE_URL.
+	uiBaseURL string
+	// slackChannel is a display string only — actual webhook routing
+	// lives in the nodemedic-slack-webhook Secret URL. Carried so the
+	// controller's startup log line can name the channel for FR-4
+	// visibility. Helm value: config.slackChannel. Env: SLACK_CHANNEL.
+	slackChannel string
 }
 
 func main() {
@@ -113,7 +131,11 @@ func run() error {
 	ctrl.SetLogger(zlog)
 	klog := ctrl.Log.WithName("nodemedic-controller")
 
-	klog.Info("starting NodeMedic Controller",
+	// FR-4 startup log line: name all three Block Kit flags so the
+	// operator can confirm chart values reached the binary. Event tag
+	// matches the schema asserted by quickstart.md and T030.
+	klog.Info("controller_startup",
+		"event", "controller_startup",
 		"clusterName", opts.clusterName,
 		"agentURL", opts.agentURL,
 		"watchedConditions", opts.watchedConditions,
@@ -122,6 +144,9 @@ func run() error {
 		"debounceWindow", opts.debounceWindow,
 		"deadlineWindow", opts.deadlineWindow,
 		"retryDeadlineExtension", opts.retryDeadlineExtension,
+		"useBlockKit", opts.useBlockKit,
+		"uiBaseURL", opts.uiBaseURL,
+		"slackChannel", opts.slackChannel,
 	)
 
 	cfg, err := ctrlconfig.GetConfig()
@@ -186,6 +211,8 @@ func run() error {
 		ClusterName:            opts.clusterName,
 		Namespace:              opts.namespace,
 		RetryDeadlineExtension: opts.retryDeadlineExtension,
+		UseBlockKit:            opts.useBlockKit,
+		UIBaseURL:              opts.uiBaseURL,
 	}
 	if err := nhdRec.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NHD reconciler: %w", err)
@@ -265,6 +292,20 @@ func parseFlags() options {
 			"via `kubectl apply --subresource=status` to drive the gate path. "+
 			"NEVER set in production.")
 
+	// Spec 003 US1 flags. All three accept env-var fallbacks via
+	// envOrFlag below so the chart can plumb them as plain env vars on
+	// the Deployment env block.
+	fs.BoolVar(&opts.useBlockKit, "use-block-kit", parseBoolEnv("USE_BLOCK_KIT", true),
+		"if true, post terminal-phase Slack messages in Block Kit format; "+
+			"if false, fall back to the legacy plain-text builders. "+
+			"Helm value: config.useBlockKit. Env: USE_BLOCK_KIT.")
+	fs.StringVar(&opts.uiBaseURL, "ui-base-url", envOr("UI_BASE_URL", "http://localhost:8080"),
+		"base URL the Block Kit \"View full diagnosis\" button points at. "+
+			"Helm value: config.uiBaseURL. Env: UI_BASE_URL.")
+	fs.StringVar(&opts.slackChannel, "slack-channel", envOr("SLACK_CHANNEL", "#nodemedic-demo"),
+		"Slack channel name (display only — webhook routing is in the "+
+			"nodemedic-slack-webhook Secret). Helm value: config.slackChannel. Env: SLACK_CHANNEL.")
+
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		// flag.ExitOnError already calls os.Exit(2) on parse failure;
 		// this branch is defensive.
@@ -287,12 +328,37 @@ func parseWatchedConditions(s string) []string {
 	return out
 }
 
+// envOr returns os.Getenv(key) if non-empty, else def. Used so flags
+// can fall back to env vars without hand-rolling each branch.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// parseBoolEnv reads key from the environment and parses it as a bool.
+// Unset, empty, or unparseable → def. Accepts the same shapes as
+// strconv.ParseBool (1/0/t/f/true/false/T/F/TRUE/FALSE/True/False).
+func parseBoolEnv(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
+}
+
 // validateClusterName enforces Constitution Article I.9 at the binary
 // level: the controller refuses to start unless --cluster-name is one of
 //   - "cf1z" (the Azure kubeadm test cluster used for the hackathon —
 //     legacy CF naming alongside jc1z / sk1z)
 //   - any name with a "test-" prefix (AWS/EKS test clusters, e.g.
 //     "test-odd-wire")
+//
 // Anything else — empty, "stg-*", "us-*", "eu-*", or other production
 // shapes — is rejected before the manager comes up.
 func validateClusterName(name string) error {
