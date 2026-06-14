@@ -175,6 +175,19 @@ def test_deployment_mounts_nr_token_secret() -> None:
     assert env["NR_MCP_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == "nodemedic-nr-token"
 
 
+def test_deployment_pins_home_to_tmp() -> None:
+    """The bundled Claude Code CLI writes ~/.claude state on every Bash
+    invocation. With readOnlyRootFilesystem=true the pod's $HOME must
+    point at the tmp emptyDir or every Bash tool call fails with EROFS
+    and the loop degrades to a thin NoAction report."""
+    _, stdout, _ = _render("cf1z")
+    docs = _parse_docs(stdout)
+    [deploy] = _by_kind(docs, "Deployment")
+    [container] = deploy["spec"]["template"]["spec"]["containers"]
+    env = {e["name"]: e for e in container["env"]}
+    assert env["HOME"]["value"] == "/tmp"
+
+
 def test_deployment_mounts_ssh_key_volume() -> None:
     _, stdout, _ = _render("cf1z")
     docs = _parse_docs(stdout)

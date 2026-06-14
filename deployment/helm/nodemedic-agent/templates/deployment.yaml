@@ -41,6 +41,15 @@ spec:
               containerPort: 8080
               protocol: TCP
           env:
+            # The bundled Claude Code CLI (claude_agent_sdk subprocess)
+            # writes session state under $HOME/.claude. The pod's
+            # readOnlyRootFilesystem blocks writes to /app, so HOME
+            # must point at the tmp emptyDir below. Without this every
+            # Bash tool invocation fails with EROFS and the loop emits
+            # a thin NoAction report — verified empirically on cf1z
+            # 2026-06-14.
+            - name: HOME
+              value: "/tmp"
             # Topology
             - name: CLUSTER_NAME
               value: {{ include "nodemedic-agent.requireTestCluster" . | quote }}
