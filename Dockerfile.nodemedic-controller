@@ -19,7 +19,7 @@
 #
 # Override at build time with --build-context to test alternate toolchains:
 #   docker buildx build --build-context builder-base=docker-image://golang:<x>
-FROM cf-registry.nr-ops.net/docker.io/library/golang:1.25 AS builder-base
+FROM --platform=$BUILDPLATFORM cf-registry.nr-ops.net/docker.io/library/golang:1.25 AS builder-base
 FROM --platform=$BUILDPLATFORM builder-base AS builder
 
 ARG TARGETARCH
