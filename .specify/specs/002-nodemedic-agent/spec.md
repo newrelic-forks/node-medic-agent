@@ -18,6 +18,19 @@ This spec defines **what the agent does**, not how each line of Python is writte
 
 ---
 
+## Clarifications
+
+### Session 2026-06-12
+
+- Q: Where does the runbook (system prompt) live, who owns it, and how does it get updated? → A: Single canonical `prompts/runbook.md` in the agent repo, baked into the image at `/app/prompts/runbook.md` at build time. Owned by Scope 3 (Sachin). Changes flow through the agent's image build — no per-cluster overrides, no runtime ConfigMap.
+- Q: What does the agent do if `POST /diagnose` arrives before the controller's NHD `Create` is visible to the agent's k8s client cache? → A: Bounded retry on `NotFound` during `Status().Update` — 3 attempts at 250 ms / 500 ms / 1 s. On exhaustion, fall through to the existing `Failed/CRWriteFailed` terminal state. Documented in FR-8.
+- Q: What happens at startup if the requested Claude model IDs (`claude-opus-4-7` / `claude-sonnet-4-6`) aren't in the nerd-completion gateway's catalog? → A: Runner resolves at startup as part of `/readyz` — try requested ID first, fall back to best-available Opus → best-available Sonnet → fail `/readyz` if nothing matches. Resolved primary + fallback IDs logged at INFO at startup. Override via `CLAUDE_MODEL` / `CLAUDE_FALLBACK_MODEL` per-cluster Helm value. Documented in FR-3 / NFR-6.
+- Q: What's the expected concurrent-load shape for the demo and rehearsal? → A: Typical demo = 1 concurrent case (operator-driven). Peak rehearsal = 10 concurrent cases (hand-crafted fault storm). `MAX_CONCURRENT_CASES=32` keeps 22 cases of headroom above peak — sized as a safety margin, not a target. NFR-8 memory sizing rebuilt around this load shape.
+- Q: Which fault classes does the Day-1 runbook cover? → A: Bound to **what's actually deployed on cf1z**, not the aspirational §4.2 list. cf1z runs `hack-node-problem-detector` (NPD v0.8.24, in `cf-monitoring`) with two custom plugins flipping NodeConditions: `ContainerRuntimeUnhealthy` (via `check-containerd.sh`, 30 s probe) and `KubeletUnhealthy` (via `check-kubelet-healthz.sh`, 30 s probe). Day-1 runbook covers these two. Day-2+ adds the §4.2 fault classes (Conntrack, FD, PID, Inode, Disk-fill, DNS, IMDS) only as Scope 1 ships corresponding NPD plugins. Demo target = `ContainerRuntimeUnhealthy` on cf1z (Harrison's `chaos-containerd-unhealthy` cronjob is the deployed fault injector; canary node `cf1z-general-nodes-2000002` already labeled `canary-chaos-test=true`).
+- Q: Is disk I/O pressure part of the agent demo? → A: **No** for v1. The deployed `chaos-disk-io-stress` cronjob produces `system-stats-monitor` Prometheus metrics (`disk/avg_queue_len`, `disk/io_time`, `disk/weighted_io`) — not NodeConditions. The agent's trigger contract requires a NodeCondition (`spec.case.trigger.type`); Prometheus metrics don't fire `POST /diagnose`. Bringing disk I/O into agent scope requires either (a) a CustomPluginMonitor that thresholds the metrics and flips a Condition like `DiskIOPressure=True`, or (b) expanding the agent's trigger model to accept Prometheus-metric thresholds. Both deferred. Documented in §3 non-goals.
+
+---
+
 ## 1. Problem statement
 
 When an NPD-watched `NodeCondition` flips `True`, an engineer's job is: form a hypothesis, gather evidence, decide whether to cordon, and document why. NodeMedic does that in 60 s.
@@ -66,6 +79,8 @@ Per Constitution Article III.3 and `nodemedic-scope.md` §9:
 - **No streaming results.** The HTTP response is `202 Accepted`; final results land on the CR. No SSE, no WebSocket.
 - **No agent-side termination ceiling.** The constitution defers `max_turns`, `max_budget_usd`, and the wall-clock `deadline` to the production hardening track. The agent loop ends only when `emit_report` is called or the model halts. The controller's deadline (Spec 001 FR-5) marks the NHD `Failed` after ~60 s but does not cancel the agent — see FR-12 for the resulting status-write race. Global cost is bounded by the Anthropic key's account-level budget cap (§10.1).
 - **No structured tool allow-list, no `can_use_tool` callback, no SSH command prefix-match.** The constitution defers these. The agent uses `Bash` directly. The deviation from `nodemedic-scope.md` §6.3 is bound by the constitution and tracked as a deferred production-hardening item.
+- **Disk I/O pressure is NOT a v1 demo target.** cf1z's `chaos-disk-io-stress` cronjob produces `system-stats-monitor` Prometheus metrics (`disk/avg_queue_len`, `disk/io_time`, `disk/weighted_io`) — not NodeConditions. The agent's trigger contract requires a NodeCondition (`spec.case.trigger.type` per `nodemedic-scope.md` §3.1); Prometheus metrics don't fire `POST /diagnose`. Bringing disk I/O into agent scope requires either (a) a CustomPluginMonitor that thresholds the metrics and flips a Condition like `DiskIOPressure=True`, or (b) expanding the agent's trigger model to accept Prometheus-metric thresholds. Both deferred. (Per Clarifications binding.)
+- **Day-1 runbook covers only the NodeConditions actually deployed on cf1z** — `ContainerRuntimeUnhealthy` (via `check-containerd.sh` plugin, primary demo target) and `KubeletUnhealthy` (via `check-kubelet-healthz.sh` plugin, secondary). The §4.2 fault-class list (Conntrack, FD, PID, Inode, Disk-fill, DNS, IMDS) is aspirational against current cf1z reality — no plugins for those classes ship today. Day-2+ runbook expansion lands as Scope 1's plugins land. (Per Clarifications binding.)
 
 If something here moves into scope mid-hackathon, it requires an amendment per the constitution.
 
@@ -73,20 +88,20 @@ If something here moves into scope mid-hackathon, it requires an amendment per t
 
 ## 4. Personas & demo scenarios
 
-**Operator (demo driver).** Runs `make inject-conntrack CLUSTER=test-odd-wire`, watches Slack and the live tool-call log streaming from the agent pod. Expects: agent picks up the case soon after NHD creation; the final report on the CR cites at least one NRQL row, one SSH probe, and one cloud-side call. The exact timing is not a contract — async means whenever the agent finishes is when the controller acts. The controller will mark the NHD `Failed` after ~60 s if the agent hasn't reported yet, but the agent keeps working in the background (FR-7 / FR-12).
+**Operator (demo driver).** Triggers the deployed chaos cronjob on cf1z (`kubectl create job --from=cronjob/chaos-containerd-unhealthy chaos-containerd-unhealthy-manual -n default`), watches Slack and the live tool-call log streaming from the agent pod. The cronjob bind-mounts a regular file over `/host/run/containerd/containerd.sock` inside the `hack-node-problem-detector` pod's container view on canary node `cf1z-general-nodes-2000002` for 90 s, NPD's `check-containerd.sh` probe (30 s interval) detects the missing socket and flips `Node.status.conditions[ContainerRuntimeUnhealthy]=True` with `reason=ContainerdUnreachable`. Expects: agent picks up the case soon after NHD creation; the final report on the CR cites at least one NRQL row, one SSH probe, and one cloud-side call. The exact timing is not a contract — async means whenever the agent finishes is when the controller acts. The controller will mark the NHD `Failed` after ~60 s if the agent hasn't reported yet, but the agent keeps working in the background (FR-7 / FR-12). After the 90 s shadow window, the cronjob umounts the bind, the probe recovers, and `ContainerRuntimeUnhealthy` flips back to `False` with `reason=ContainerRuntimeIsHealthy`.
 
 **CF on-call (post-hackathon shape).** Reads the diagnosis on the CR. Expects: every claim in `rootCause` is supported by at least one entry in `evidence[]`. The agent's reasoning chain is reconstructable from the live structured stdout logs while the pod is up; durable replay across pod restarts is deferred to the production rollout (durable audit JSONL on the constitution's production-hardening list).
 
 **Captains reviewing the design.** Expect that auto-cordon is defensible because (a) the agent's credentials cannot mutate the cluster or cloud (Constitution Article I.1 — verified by chart review during hackathon, by a programmatic post-install Job in production per the "Production hardening" list), (b) evidence count is gated by the controller (Spec 001 FR-6), and (c) every tool call left a structured-log line with `{tool, command-or-args}` (NFR-3). The structured allow-list, durable audit JSONL, programmatic credential verification, and several other production controls are deferred per the constitution's hackathon-scope simplifications; credential-layer least privilege (Article I.1) is the primary remaining safety boundary.
 
 ### Walkthrough — happy path
-1. Controller `POST /diagnose` with `case.provider=aws`, `trigger.type=ConntrackSaturated`.
+1. Controller `POST /diagnose` with `case.provider=azure`, `trigger.type=ContainerRuntimeUnhealthy` (cf1z's deployed Day-1 demo path; see Clarifications).
 2. Agent returns `202 Accepted` promptly; queues a worker task. (Async — the controller is not waiting on a synchronous diagnosis result here.)
 3. Worker boots a `ClaudeSDKClient` with the cached runbook prompt, `permission_mode="bypassPermissions"`, `PreToolUse` hook registered, `mcp_servers={"nr": <NR HTTP MCP>}`, `Bash` tool enabled.
 4. Loop runs — agent calls (illustrative order, agent picks):
    - `Bash`: `kubectl --context=$KUBE_CONTEXT get pods --field-selector spec.nodeName=ip-10-1-2-3.ec2.internal -A`
    - `nr.execute_nrql_query`: `K8sNodeSample` / `Log` on the node, last 15m, `account_id=1`
-   - `Bash`: `ssh -i $SSH_KEY_PATH -o StrictHostKeyChecking=no ec2-user@<node-ip> 'cat /proc/sys/net/netfilter/nf_conntrack_count /proc/sys/net/netfilter/nf_conntrack_max'`
+   - `Bash`: `ssh -i $SSH_KEY_PATH -o StrictHostKeyChecking=no <user>@<node-ip> 'ls -la /run/containerd/containerd.sock; pgrep -fa containerd | head -3; journalctl -u containerd --since "5 min ago" --no-pager | tail -20'`
    - `Bash`: `aws ec2 describe-instance-status --instance-ids i-0abc1234 --region us-east-2`
    - `Bash`: `aws health describe-events --filter "services=EC2,regions=us-east-2" --max-results 5`
 5. Agent calls `emit_report` (an in-process tool registered via the SDK) with `rootCause`, `rcaCategory=Conntrack`, `confidence=0.85`, `evidence=[nrql:…, ssh:…, cloud:…]` (3 distinct sources, well-supported), `recommendation.action=Cordon`.
@@ -156,8 +171,15 @@ For each accepted case the agent MUST:
   - **Provider: internal nerd-completion gateway.** Auth via `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` env vars — the standard Claude Agent SDK env-var protocol with the base URL pointed at `https://nerd-completion.staging-service.nr-ops.net`. Token is mounted from `Secret/nodemedic-anthropic-token`, sourced from Vault path `containers/teams/nova/staging/nova-service/NERD_COMPLETION_API_TOKEN` (reusing Nova's `nova-service` path for the hackathon — same path `nova/k8s-agent-claude-sdk` uses). No Bedrock IRSA, no separate Anthropic billing setup.
   - **Primary model: `claude-opus-4-7`.** Set via `CLAUDE_MODEL` env var. The 1M-context variant is conservative headroom but the workload footprint (system prompt ~2 KB, user prompt small, tool results 4 KB-truncated, even long loops well under 200 KB total) does not actually require it; whatever the gateway exposes is fine.
   - **Fallback model: `claude-sonnet-4-6`** (default context). The Claude Agent SDK's fallback mechanism handles automatic switchover.
+  - **Gateway-availability fallback chain (per Clarifications binding):** the requested IDs (`claude-opus-4-7` / `claude-sonnet-4-6`) MAY not be in the nerd-completion gateway's catalog at deploy time — the gateway's catalog is curated by its operators and lags Anthropic's public API. The runner MUST resolve the requested IDs at startup as part of `/readyz`:
+    1. If `CLAUDE_MODEL` is in the gateway catalog, use it.
+    2. Else, fall back to the best-available Opus on the gateway (newest version).
+    3. Else, fall back to the best-available Sonnet on the gateway (newest version).
+    4. Else, fail `/readyz` (no usable Claude model — block startup, surface the error).
+
+    The resolved primary and fallback model IDs MUST be logged at INFO at startup with `event=model_resolved primary=… fallback=…` so the demo deck can cite what actually shipped. `CLAUDE_MODEL` and `CLAUDE_FALLBACK_MODEL` are overridable per-cluster Helm value if a cluster wants to pin a specific gateway-curated ID.
   - **SDK wiring is the standard env-var protocol.** No code change versus the public Anthropic API path — the SDK's HTTP client respects `ANTHROPIC_BASE_URL`, so pointing it at the gateway is the entire integration. The plan confirms the exact base URL (staging vs prod nerd-completion endpoint) at deploy time.
-  - `system_prompt = load_runbook()` with Anthropic prompt-cache `cache_control` set on the system block. Prompt caching applies **only** to the static runbook prefix — it is a token-cost optimization on the system block, not conversation memory. The user prompt, tool calls, tool results, and assistant turns are case-local and MUST NOT be cached or replayed across cases.
+  - `system_prompt = load_runbook()` reads the canonical runbook at `/app/prompts/runbook.md` (baked into the image at build time per the Clarifications session — single source of truth, no per-cluster overrides, no runtime ConfigMap mount). Anthropic prompt-cache `cache_control` is set on the system block. Prompt caching applies **only** to the static runbook prefix — it is a token-cost optimization on the system block, not conversation memory. The user prompt, tool calls, tool results, and assistant turns are case-local and MUST NOT be cached or replayed across cases.
   - `permission_mode = "bypassPermissions"`. (Constitution hackathon-scope simplification.)
   - `hooks = [("PreToolUse", tool_log_hook)]` — emits a structured stdout log line per tool call (NFR-3).
   - `mcp_servers = {"nr": <NR HTTP MCP config>}` (FR-4).
@@ -197,9 +219,9 @@ The agent MUST be wired with exactly two tool surfaces:
 Two-layer allow-list enforcement is deferred per the constitution's hackathon-scope simplifications. Credential-layer least privilege (NFR-4) is the primary safety boundary. To restore for production: see the constitution's "Production hardening" list (items 1–3).
 
 ### FR-6 — Cloud dispatch via runbook prompt
-The agent MUST be told via the runbook system prompt and the per-case user prompt which cloud the case concerns:
+The agent MUST be told via the runbook system prompt (`/app/prompts/runbook.md` per Clarifications) and the per-case user prompt which cloud the case concerns:
 - The user prompt injects `provider=case.provider` (`aws` or `azure`) along with `region` and `instanceId`.
-- The runbook prompt has a section per cloud telling the agent to use `aws …` commands when `provider=aws` and `az …` commands when `provider=azure`.
+- The runbook has a section per cloud telling the agent to use `aws …` commands when `provider=aws` and `az …` commands when `provider=azure`.
 
 The agent pod's per-cluster install only carries the credentials for that cluster's cloud (per NFR-5):
 - AWS-cluster install: `aws` CLI authenticated via IRSA; `az` CLI present but unauthenticated → `az` calls fail.
@@ -266,13 +288,22 @@ When the agent calls `emit_report`:
 2. **No agent-side evidence-count gate.** A report with a single evidence entry is accepted and written to the CR. The controller's confidence gate (Constitution Article I.3 / controller spec FR-6) is the single layer that enforces "≥ 2 distinct sources" for auto-cordon. Reports below that bar still produce a CR with full diagnosis content; they just route to `HumanInLoop` instead of cordoning.
 3. On valid payload: build the NHD `status.diagnosis` object per `nodemedic-scope.md` §2.2:
    - `modelUsed`, `completedAt` populated by the runner from session state. `turnsUsed`/`costUSD` populated best-effort from SDK metadata if available. `auditLogRef.objectStore` is left empty (no durable audit log; constitution "Production hardening" item 7 to restore).
-4. `Status().Update` the existing NHD CR (named `<node-short>-<unix-ts>` per the controller spec; the agent finds it by `caseId` matching `spec.case.caseId`). Use server-side apply with field manager `nodemedic-agent`.
+4. `Status().Update` the existing NHD CR (named `<node-short>-<unix-ts>` per the controller spec; the agent finds it by `caseId` matching `spec.case.caseId`). Use server-side apply with field manager `nodemedic-agent`. The CR is created by the controller before `POST /diagnose` is issued, but apiserver caching plus cross-pod timing means the agent's k8s client cache MAY not have observed the `Create` yet at the moment the agent writes — see the `NotFound` retry policy below.
 5. Set `status.phase="Diagnosed"` on the CR.
 6. End the loop. Emit `case_complete` metric.
 
 The agent process MUST never call `Create` on NHD — the controller is the sole creator.
 
-If `Status().Update` fails (apiserver error, conflict, RBAC denied), the runner MUST retry once after 1 s. On second failure: mark the case `Failed` with `reason=CRWriteFailed`, log the error verbatim, and return.
+If `Status().Update` fails, the runner MUST retry per the failure class:
+
+| Failure class | Retry policy |
+|---|---|
+| `NotFound` (the CR isn't visible to the agent's k8s client cache yet — controller `Create` race) | **3 attempts at 250 ms / 500 ms / 1 s.** Absorbs the structural race between the controller's `Create` and the agent's first cache observation. Per the Clarifications binding. |
+| Conflict (`409`) on the status subresource | Retry once after 1 s with a fresh read of the CR (server-side-apply field-manager semantics handle merge). |
+| Other apiserver errors (5xx, transient network) | Retry once after 1 s. |
+| RBAC denied (`403`) or schema validation (`422`) | No retry — terminal. |
+
+If retries are exhausted (or the failure class is terminal): mark the case `Failed` with `reason=CRWriteFailed`, log the error verbatim, and return.
 
 The runbook prompt MUST instruct the agent to:
 - Reflect evidence quality in `confidence` — single-source or contradictory evidence should yield a value below 0.7.
@@ -377,7 +408,7 @@ The agent's `POST /diagnose` is async — the controller's reconcile loop does n
 - **The controller's deadline (Spec 001 FR-5, ~60 s) bounds the user-visible case duration**, but it does not cancel the agent. The agent may still complete after the controller marks the NHD `Failed`; FR-12 governs that path.
 - **Soft targets** (used to size resource limits and observability dashboards, not to gate `Failed`/`Acted`):
   - `POST /diagnose` receipt → `202` returned: a few seconds is fine; queue-time is not a correctness property.
-  - Loop start → `emit_report`: the demo shape is ~30–50 s on conntrack-class faults. Not a contract; can be longer for harder cases.
+  - Loop start → `emit_report`: the demo shape is ~30–50 s on `ContainerRuntimeUnhealthy`-class faults. Not a contract; can be longer for harder cases. The 90 s containerd-shadow window in the chaos cronjob means the agent should observe the fault while it is still active if investigation lands within the first ~60 s; later investigations may see only the recovery transition.
   - CR write after `emit_report`: ~1–2 s typical.
 
 A case that runs 90 s, 5 min, or longer is not a defect — it's an agent doing the work the demo is meant to showcase. The right operator response is to read the structured stdout logs and the eventually-written diagnosis (subject to FR-12), not to add a timeout.
@@ -436,8 +467,8 @@ All deploy-time parameters are env vars on the Deployment:
 | `FALLBACK_MODEL` | `claude-sonnet-4-6` | SDK fallback (see §10.9 — fallback context-window choice is open). |
 | `ANTHROPIC_AUTH_TOKEN` | (required) | nerd-completion gateway token, mounted from `Secret/nodemedic-anthropic-token`. Sourced from Vault: `containers/teams/nova/staging/nova-service/NERD_COMPLETION_API_TOKEN` (reusing Nova's path for the hackathon). |
 | `ANTHROPIC_BASE_URL` | `https://nerd-completion.staging-service.nr-ops.net` | nerd-completion endpoint. Plan confirms staging vs prod URL at deploy. |
-| `CLAUDE_MODEL` | `claude-opus-4-7` | primary model. SDK's standard env var. |
-| `CLAUDE_FALLBACK_MODEL` | `claude-sonnet-4-6` | fallback model. |
+| `CLAUDE_MODEL` | `claude-opus-4-7` | primary model (requested ID). SDK's standard env var. Resolved at startup against the gateway catalog per FR-3's fallback chain; if absent, the runner falls back to best-available Opus → best-available Sonnet → fails `/readyz`. Resolved ID logged at startup. |
+| `CLAUDE_FALLBACK_MODEL` | `claude-sonnet-4-6` | fallback model (requested ID). Same gateway-availability resolution as `CLAUDE_MODEL`. |
 | `NR_MCP_URL` | (required) | NR HTTP MCP base URL |
 | `NR_MCP_TOKEN` | (required) | NR MCP auth — mounted from `Secret/nodemedic-nr-token` |
 | `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` | (required on Azure install) | mounted from `Secret/nodemedic-azure-creds` |
@@ -455,8 +486,18 @@ Every tool call MUST appear in the structured stdout logs (NFR-3). For the lifet
 The CR's `status.diagnosis.evidence[]` MUST be sufficient to reconstruct the agent's *conclusion* — citations of what evidence supported the diagnosis. The CR is durable (apiserver-backed), the logs are not. Production restoration brings back the per-case JSONL on PVC plus `auditLogRef.objectStore` on the CR (constitution "Production hardening" item 7).
 
 ### NFR-8 — Resource footprint
-Hackathon target:
-- **Memory**: request `1 Gi`, limit `3 Gi`. Idle baseline is ~400 MB (CLI bundle: `aws` v2 ~150 MB resident, `az` ~200 MB on first invocation, Python runtime + agent + SDK ~100 MB). Each active case adds ~75 MB (SDK session + Bash subprocess buffers + 4 KB-truncated tool result buffers). At `MAX_CONCURRENT_CASES=32` the worst-case ceiling is ~400 MB + 32 × 75 MB ≈ 2.8 GB — fits inside the 3 Gi limit with headroom. The 1 Gi *request* covers the realistic-load shape (a few simultaneous cases) without reserving demo cluster capacity we don't routinely need.
+
+**Expected load shape** (per Clarifications binding):
+- **Typical demo**: 1 concurrent case (operator drives one fault injection at a time, watches it through, then moves on).
+- **Peak rehearsal**: 10 concurrent cases (hand-crafted storm — operator injects faults across multiple nodes back-to-back to stress-test the agent under load).
+
+NFR-8's sizing keeps 22 cases of headroom above peak rehearsal so the storm scenario doesn't bump up against the cap; controller-side debounce (Spec 001 FR-1, 30 s per `(node, condition)`) plus operator-driven fault injection mean we never expect to *organically* hit the 32-case cap.
+
+**Hackathon target:**
+- **Memory**: request `1 Gi`, limit `3 Gi`. Idle baseline is ~400 MB (CLI bundle: `aws` v2 ~150 MB resident, `az` ~200 MB on first invocation, Python runtime + agent + SDK ~100 MB). Each active case adds ~75 MB (SDK session + Bash subprocess buffers + 4 KB-truncated tool result buffers).
+  - At typical load (1 case): ~475 MB peak — well below the 1 Gi request, no spillover.
+  - At peak rehearsal (10 cases): ~1.15 GB peak — slight burst above the 1 Gi request, comfortably inside the 3 Gi limit.
+  - At cap (32 cases — not expected to occur during hackathon): ~2.8 GB ceiling, still inside the 3 Gi limit. Sized for safety margin, not as a target.
 - **CPU**: request `1`, limit `4`. The agent is mostly I/O-bound (waiting on Anthropic, NR MCP, SSH, cloud APIs) — CPU bursts come from JSON parsing and SDK message handling.
 - **PVC**: not required for hackathon scope (the constitution defers the durable audit JSONL). `emptyDir` is fine for any scratch the agent writes via SDK built-in `Write`/`Edit`. Production restoration adds back a `2Gi` PVC for `/var/lib/nodemedic/audit`.
 
@@ -466,10 +507,10 @@ No empirical baseline yet; revisit after Day 1 evening. If 32-case storms in reh
 Single Python image, multi-stage build. Target ≤ 1.5 GB (the CLI bundle is unavoidable given the `Bash`-driven tool surface):
 - `aws` CLI v2: ~150 MB.
 - `az` CLI: ~250 MB.
-- `kubectl` 1.31: ~50 MB.
+- `kubectl` 1.33: ~50 MB.
 - Python runtime + agent code + SDK: ~300 MB.
 
-Runtime deps pinned (`pyproject.toml`). CLI versions pinned (per §10.8). Image MUST be reproducibly built (no random uuids in layers, no per-build timestamps in any non-OCI label).
+Runtime deps pinned (`pyproject.toml`). CLI versions pinned (per §10.8). The canonical runbook (`prompts/runbook.md` in the agent repo) is copied to `/app/prompts/runbook.md` at build time per the Clarifications binding — runbook content is part of the image, not a runtime mount, so the image SHA pins the runbook version. Image MUST be reproducibly built (no random uuids in layers, no per-build timestamps in any non-OCI label).
 
 The 1.5 GB target is larger than would be ideal for production — accepted because the constitution's hackathon-scope simplification chose `Bash` + bundled CLIs over in-proc `@tool` Python wrappers around `boto3`/`azure-mgmt-compute`, which is a substantial Day-1 work saving despite the larger image.
 
@@ -505,10 +546,10 @@ Idempotency is the agent's responsibility (FR-10). The controller is allowed to 
 
 Each item is independently demonstrable on the demo cluster:
 
-- [ ] **AC-1** Apply CRD + install Helm chart on `test-odd-wire`. `kubectl get deploy nodemedic-agent -n container-fabric` shows 1/1 ready. `/healthz` and `/readyz` return 200.
+- [ ] **AC-1** Apply CRD + install Helm chart on **cf1z**. `kubectl --context=cf1z get deploy nodemedic-agent -n container-fabric` shows 1/1 ready. `/healthz` and `/readyz` return 200. (`/readyz` includes the model-resolution check from FR-3 — the resolved primary + fallback model IDs MUST be in the startup log.)
 - [ ] **AC-2** `curl -X POST :8080/diagnose -d @case.json` (no auth header — hackathon scope has no auth per FR-1) returns `202 {status:"queued"}`. Missing field → `400`. Wrong `provider` enum → `400`. Calls with an `Authorization: Bearer …` header are accepted (header is ignored, not rejected). (No latency assertion — async endpoint.)
-- [ ] **AC-3** With a real NHD CR pre-created by the controller (or hand-applied), inject conntrack saturation on a node in `test-odd-wire`. The agent eventually `Update`s `status.diagnosis` with `confidence ≥ 0.7`, `evidence[]` containing **at least 2 distinct sources**, `recommendation.action=Cordon`, and `phase=Diagnosed`. "Eventually" has no agent-side time bound (FR-7); for the demo we expect ~30–50 s but a 90 s case still passes this AC. The case passes this AC if the diagnosis lands before the controller marks the CR `Failed` (Spec 001 FR-5, ~60 s); if it lands later, FR-12 governs the write suppression and AC-7 covers that late-write path.
-- [ ] **AC-4** Repeat AC-3 on the Azure kubeadm test cluster. Same image, same chart, only per-cluster Helm values differ. CR shows `provider=azure` echoed and at least one `evidence[]` entry with `source=cloud` citing an Azure-side response (instance view or Resource Health).
+- [ ] **AC-3** Trigger Harrison's `chaos-containerd-unhealthy` cronjob on cf1z's canary node (`kubectl --context=cf1z create job --from=cronjob/chaos-containerd-unhealthy chaos-test-manual -n default`). Within ~30 s of the bind-mount, NPD's `check-containerd.sh` flips `Node.status.conditions[ContainerRuntimeUnhealthy]=True` with `reason=ContainerdUnreachable`; the controller creates an NHD CR and calls `POST /diagnose`. The agent eventually `Update`s `status.diagnosis` with `confidence ≥ 0.7`, `evidence[]` containing **at least 2 distinct sources**, `recommendation.action=Cordon`, and `phase=Diagnosed`. "Eventually" has no agent-side time bound (FR-7); for the demo we expect ~30–50 s but a 90 s case still passes this AC. The case passes this AC if the diagnosis lands before the controller marks the CR `Failed` (Spec 001 FR-5, ~60 s); if it lands later, FR-12 governs the write suppression and AC-7 covers that late-write path.
+- [ ] **AC-4** Cloud parity is naturally satisfied by AC-3 — cf1z is itself an Azure kubeadm cluster, so the AC-3 happy path exercises the Azure backend (`provider=azure`, `az` CLI, Azure Resource Health). For an explicit AWS-side demonstration, repeat AC-3's pattern on a `test-*` EKS cluster with an equivalent fault injector once one ships (no AWS chaos cronjob exists today). Until then, the same image, same chart, same runbook serving cf1z is the binary-portability evidence.
 - [ ] ~~**AC-5** Credential-layer verification (FR-13)~~. **Removed** in this iteration (FR-13 deferred for hackathon scope). Captains MUST eyeball the rendered Helm `Role`/`ClusterRole`/IRSA policy / Azure role assignment / NR token scope before each install — manual review replaces the verification job. AC returns when FR-13 returns for production.
 - [ ] **AC-6** `emit_report` with a **single evidence source** is accepted (schema-valid; FR-8 has no count gate). The CR is written with the single-source `evidence[]`. Downstream, the controller's confidence gate routes the case to `HumanInLoop` rather than cordoning. Verifies the redundant agent-side gate has been removed and the controller-side gate is the sole enforcer.
 - [ ] **AC-7** Late-write race: hand-craft a case where the controller marks the NHD `Failed` (e.g. by directly patching `phase=Failed` while the agent is mid-loop). When the agent eventually calls `emit_report`, FR-12 detects the existing `Failed` phase and refuses to overwrite. The CR retains `phase=Failed` with the controller's reason. Structured stdout logs (NFR-3) record the agent's tool calls and the deferred write decision (INFO log line with the observed phase) — visible via `kubectl logs` while the pod is up. No agent-side metric reports a failure.
@@ -518,23 +559,34 @@ Each item is independently demonstrable on the demo cluster:
 - [ ] **AC-11** Kube RBAC: Helm install with a wider role fails (chart README check / pre-install hook). Agent's actual role permits only the verbs in FR-14.
 - [ ] **AC-12** *(optional, only if `/metrics` is implemented per FR-2)* Prometheus metrics in NFR-3 are populated with non-zero values after running the demo case end-to-end. If `/metrics` is not implemented, this AC is N/A and the demo deck relies on structured stdout logs alone for observability evidence.
 - [ ] **AC-13** Cross-cloud probing prevented by credentials: on the AWS install, the agent running `az vm get-instance-view …` fails (no Azure credential mounted). On the Azure install, `aws ec2 describe-instance-status …` fails. Verifies FR-6's credential-layer-only enforcement of cloud dispatch.
-- [ ] **AC-14** Case isolation: run two cases back-to-back against different nodes (e.g. case A on `nodeA` with `trigger=ConntrackSaturated`, case B on `nodeB` with `trigger=DiskFill`). Filtering `kubectl logs | jq 'select(.caseId=="A")'` and `... select(.caseId=="B")` returns disjoint trees of tool calls. Case B's diagnosis MUST cite only evidence about `nodeB` and MUST NOT reference `nodeA` or any tool result observed during case A. Verifies G2 / FR-3 isolation guarantee.
+- [ ] **AC-14** Case isolation: run two cases back-to-back against different nodes (e.g. case A on `cf1z-general-nodes-2000002` with `trigger=ContainerRuntimeUnhealthy`, case B on a different node with `trigger=KubeletUnhealthy` — once a kubelet-unhealthy chaos injector exists, or via hand-crafted CR for the rehearsal). Filtering `kubectl logs | jq 'select(.caseId=="A")'` and `... select(.caseId=="B")` returns disjoint trees of tool calls. Case B's diagnosis MUST cite only evidence about case B's node and MUST NOT reference case A's node or any tool result observed during case A. Verifies G2 / FR-3 isolation guarantee.
 
 ---
 
 ## 9. Demo flow (how this spec earns its keep)
 
-1. Operator: `make inject-conntrack CLUSTER=test-odd-wire`.
-2. NPD flips `ConntrackSaturated=True` within 15 s.
-3. Controller creates NHD and `POST`s `/diagnose`. Agent returns `202` promptly; pod log shows `case_received caseId=…`.
-4. Live tail of the agent pod log streams the loop: `Bash: kubectl get pods …`, `nr.execute_nrql_query …`, `Bash: ssh -i $SSH_KEY_PATH … 'cat /proc/sys/net/netfilter/nf_conntrack_count'`, `Bash: aws ec2 describe-instance-status …`, etc.
-5. Eventually (typically ~30–50 s on conntrack faults; can be longer for harder cases): `emit_report` accepted; CR `status.diagnosis` updated; `phase=Diagnosed`. If the agent runs past the controller's ~60 s deadline, the controller posts a "needs human review" Slack message and the agent's eventual write is suppressed by FR-12.
-6. Controller sees the update via informer, applies confidence gate, cordons.
-7. `kubectl get nhd <name> -o yaml` shows: `case` populated by controller, `diagnosis` populated by agent, `action` populated by controller. Three scopes, one CR, full trace.
-8. `kubectl logs <agent-pod> --since=2m | jq 'select(.caseId=="<caseId>")'` — every probe shown with its full command string. (No durable JSONL for hackathon scope; the demo captures this output during the live run for the deck.)
-9. Repeat on Azure kubeadm cluster. Same image, same demo flow; the agent runs `az` commands instead of `aws`.
+**Demo target: cf1z + `ContainerRuntimeUnhealthy`.** Per Clarifications binding. cf1z is the active hackathon Azure kubeadm cluster (k8s 1.33.8). Canary node `cf1z-general-nodes-2000002` is already labeled `canary-chaos-test=true`. Harrison's `chaos-containerd-unhealthy` cronjob is deployed in `default` namespace.
 
-For the gate-fail rehearsal: hand-craft a case where the runbook prompts the agent to gather evidence that comes back empty, then have the agent emit a low-confidence report. Controller's confidence gate fails (confidence < 0.7) and routes to HumanInLoop. For the controller-deadline race demo: directly patch the CR to `phase=Failed` while the agent is mid-loop, then watch the agent's eventual `emit_report` get suppressed by FR-12 — `kubectl logs` (while still showing this pod's history) is the only record of the late completion.
+1. Operator triggers a manual chaos run: `kubectl --context=cf1z create job --from=cronjob/chaos-containerd-unhealthy chaos-test-manual -n default`.
+2. The chaos pod finds the `hack-node-problem-detector` pod on the canary node, `kubectl exec`s into it, and bind-mounts a regular file over `/host/run/containerd/containerd.sock` (the existing NPD pod's container view of the host socket — host socket is untouched). Shadow holds for 90 s.
+3. Within ~30 s of shadow activation, NPD's `check-containerd.sh` plugin (30 s probe interval) sees `! -S /host/run/containerd/containerd.sock`, exits 1, and NPD flips `Node.status.conditions[ContainerRuntimeUnhealthy]=True` with `reason=ContainerdUnreachable`.
+4. Controller (Spec 001) sees the condition flip via informer, debounces 30 s per `(node, condition)`, creates the NHD CR, and `POST`s `/diagnose`. Agent returns `202` promptly; pod log shows `case_received caseId=…`.
+5. Live tail of the agent pod log streams the loop. Illustrative tool sequence (the agent picks the actual order):
+   - `Bash: kubectl get node cf1z-general-nodes-2000002 -o yaml | yq '.status.conditions'` — confirm the trigger.
+   - `nr.execute_nrql_query` against account `1`: `SELECT * FROM K8sNodeSample WHERE clusterName='cf1z' AND nodeName='cf1z-general-nodes-2000002' SINCE 15 minutes ago`.
+   - `Bash: ssh -i $SSH_KEY_PATH -o StrictHostKeyChecking=no <user>@<canary-internal-ip> 'ls -la /run/containerd/containerd.sock; pgrep -fa containerd; journalctl -u containerd --since "5 min ago" --no-pager | tail -20'` — verifies the host socket vs the container's view (a clue for the runbook to interpret: host socket is fine but the NPD pod's view is shadowed).
+   - `Bash: az vm get-instance-view --name <vm-name> --resource-group <rg>` — Azure-side instance health.
+6. Eventually (typically ~30–50 s; can be longer): `emit_report` accepted; CR `status.diagnosis` updated; `phase=Diagnosed`. If the agent runs past the controller's ~60 s deadline, the controller posts a "needs human review" Slack message and the agent's eventual write is suppressed by FR-12.
+7. Controller sees the update via informer, applies confidence gate, cordons.
+8. `kubectl --context=cf1z get nhd <name> -n container-fabric -o yaml` shows: `case` populated by controller, `diagnosis` populated by agent, `action` populated by controller. Three scopes, one CR, full trace.
+9. `kubectl --context=cf1z logs <agent-pod> -n container-fabric --since=2m | jq 'select(.caseId=="<caseId>")'` — every probe shown with its full command string. (No durable JSONL for hackathon scope; the demo captures this output during the live run for the deck.)
+10. Wait ~60 s after the chaos pod's `umount` — `ContainerRuntimeUnhealthy` flips back to `False` with `reason=ContainerRuntimeIsHealthy`. The cordon does NOT auto-uncordon (Spec 001 self-heal behavior is intentional); operator manually uncordons after reviewing the diagnosis.
+
+For the **gate-fail rehearsal**: hand-craft a case where the runbook prompts the agent to gather evidence that comes back empty, then have the agent emit a low-confidence report. Controller's confidence gate fails (confidence < 0.7) and routes to HumanInLoop.
+
+For the **controller-deadline race demo**: directly patch the CR to `phase=Failed` while the agent is mid-loop, then watch the agent's eventual `emit_report` get suppressed by FR-12 — `kubectl logs` (while still showing this pod's history) is the only record of the late completion.
+
+**AWS / EKS path:** not part of the v1 demo. cf1z is Azure kubeadm and the deployed chaos cronjob targets it. An EKS demo requires an equivalent fault injector on a `test-*` cluster (out of scope for hackathon kickoff).
 
 ---
 
@@ -547,7 +599,7 @@ For the gate-fail rehearsal: hand-craft a case where the runbook prompts the age
 5. ~~**Slack "View audit log" link target — closed (drop the button).**~~ Already closed in an earlier iteration. Hackathon scope has no durable audit log; the controller drops the button. Returns when the durable JSONL is restored for production.
 6. **Runbook caching across model swap.** If the loop falls back from primary to fallback model mid-case, the prompt cache is not shared between models. Acceptable — first fallback call pays the cache miss, every subsequent one hits.
 7. ~~**PVC sizing.**~~ Closed for hackathon scope: no PVC required.
-8. **CLI versions in the image.** Pin `aws` v2.x, `az` 2.x, `kubectl` matching cluster minor versions. Clusters today are on 1.31, so 1.31 `kubectl` client is the safe choice.
+8. **CLI versions in the image.** Pin `aws` v2.x, `az` 2.x, `kubectl` matching cluster minor versions. **cf1z is on k8s 1.33.8** (verified live 2026-06-13), so `kubectl` 1.33.x is the safe choice for the hackathon image.
 
 **Secret manifest templates** for the closed items live at `.specify/specs/002-nodemedic-agent/manifests/` — apply them per cluster install and patch values in. The Helm chart in the plan phase will absorb these as templated values once the chart skeleton lands.
 
