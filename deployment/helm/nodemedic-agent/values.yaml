@@ -1,0 +1,78 @@
+# Default values for the NodeMedic agent chart.
+# Per Constitution Article I.5 the chart's _helpers.tpl `requireTestCluster`
+# guard refuses to render unless `clusterName` is in {cf1z, jc1z, sk1z} or
+# matches `test-*`. The default below is empty so a forgotten override
+# fails loudly.
+
+# REQUIRED. Cluster name passed to the controller as part of the agent's
+# topology env. Must satisfy the cluster-name guard.
+clusterName: ""
+
+# Agent image — pushed to cf-registry per Clarifications binding.
+image:
+  repository: cf-registry.nr-ops.net/container-fabric/nodemedic-agent
+  tag: ""           # defaults to .Chart.AppVersion when unset
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Cloud-provider toggle. Drives credential mounts (AWS IRSA SA annotation
+# vs Azure SP Secret) and is exposed to the agent process as
+# CLOUD_PROVIDER. The two per-cloud values files (values-azure.yaml /
+# values-eks.yaml) override this and the matching credential refs.
+cloud:
+  provider: ""    # "aws" or "azure"
+
+  # AWS-only knobs — ignored when cloud.provider != "aws".
+  awsRoleArn: ""  # IRSA role ARN, set on the ServiceAccount annotation
+
+# Agent runtime config — flows in as env vars to the container.
+config:
+  maxConcurrentCases: 32
+  # DO NOT raise without addressing FR-10 case-table coherence + NFR-2
+  # leader coordination — multi-replica is out of scope for v1.
+  stubAgent: false   # Set to true ONLY for unit-test isolation.
+  logLevel: "info"
+  readyzProbeTimeoutSec: 5
+  runbookPath: "/app/prompts/runbook.md"
+  kubeNamespace: "cf-monitoring"
+  nrAccountId: 1
+  claudeModel: "claude-opus-4-7"
+  claudeFallbackModel: "claude-sonnet-4-6"
+  anthropicBaseUrl: "https://nerd-completion.staging-service.nr-ops.net"
+  # NR HTTP MCP URL — operator-supplied per the manifests/README.md path.
+  nrMcpUrl: ""
+
+# Secrets the agent mounts as env vars / files. Created out-of-band per
+# .specify/specs/002-nodemedic-agent/manifests/. The chart only references
+# them so a missing Secret fails fast at pod startup rather than silently
+# at first POST /diagnose.
+secrets:
+  anthropicTokenSecretName: "nodemedic-anthropic-token"  # data key: token
+  nrTokenSecretName: "nodemedic-nr-token"                # data key: token
+  sshKeySecretName: "nodemedic-ssh-key"                  # data key: id_ed25519
+  azureCredsSecretName: "nodemedic-azure-creds"          # keys: tenantId, clientId, clientSecret
+
+# Deployment-level knobs.
+replicaCount: 1   # FR-10: single replica (case-table coherence)
+resources:
+  requests:
+    cpu: 1
+    memory: 1Gi
+  limits:
+    cpu: 4
+    memory: 3Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Service — ClusterIP :8080 → :8080. Selector binds to the controller's
+# default agentURL (deployment/helm/nodemedic-controller/values-azure.yaml:21).
+service:
+  type: ClusterIP
+  port: 8080
+
+# Pre-install runbook lint Job (T025) — gates AC-15 install-time.
+runbookLintJob:
+  enabled: true

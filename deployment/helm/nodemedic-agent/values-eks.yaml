@@ -1,0 +1,30 @@
+# test-* (EKS) install overrides.
+#
+# Placeholder for the future EKS test-cluster install. Sets `cloud.provider`
+# to aws and expects the IRSA role ARN to be passed via --set:
+#   --set cloud.awsRoleArn=arn:aws:iam::ACCOUNT:role/nodemedic-agent
+#
+# Symmetric to values-azure.yaml — same chart, no Azure SP Secret mounted
+# (the Deployment template's `eq .Values.cloud.provider "azure"` guard
+# omits the Azure env block when this file is in effect).
+
+cloud:
+  provider: "aws"
+  awsRoleArn: ""   # set via --set or override file at install time
+
+config:
+  anthropicBaseUrl: "https://nerd-completion.staging-service.nr-ops.net"
+  claudeModel: "claude-opus-4-7"
+  claudeFallbackModel: "claude-sonnet-4-6"
+  nrAccountId: 1
+  nrMcpUrl: "https://mcp.newrelic.com/mcp"
+  kubeNamespace: "cf-monitoring"
+  stubAgent: false
+
+resources:
+  requests:
+    cpu: 1
+    memory: 1Gi
+  limits:
+    cpu: 4
+    memory: 3Gi
