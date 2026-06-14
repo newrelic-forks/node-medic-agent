@@ -1,0 +1,19 @@
+{
+  "caseId": "8f3c1e2a-9b4d-4f7a-9c1e-2a9b4d4f7a9c",
+  "nodeName": "ip-10-1-2-3.ec2.internal",
+  "clusterName": "test-odd-wire",
+  "provider": "aws",
+  "region": "us-east-2",
+  "instanceId": "i-0abc1234deadbeef",
+  "trigger": {
+    "type": "ConntrackSaturated",
+    "reason": "ConntrackHigh",
+    "message": "nf_conntrack_count=262100 max=262144",
+    "observedAt": "2026-06-12T15:00:00Z"
+  },
+  "budgets": {
+    "maxTurns": 15,
+    "maxBudgetUSD": "0.50",
+    "deadlineSec": 60
+  }
+}
