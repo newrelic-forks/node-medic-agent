@@ -55,9 +55,38 @@ func TestCordon_HappyPath(t *testing.T) {
 	if !fresh.Spec.Unschedulable {
 		t.Errorf("expected node Unschedulable=true after cordon")
 	}
+	if got := fresh.Annotations[MLCSkipDeletionAnnotation]; got != "true" {
+		t.Errorf("expected %q annotation = %q, got %q",
+			MLCSkipDeletionAnnotation, "true", got)
+	}
 }
 
-func TestCordon_AlreadyCordoned(t *testing.T) {
+func TestCordon_AlreadyCordonedAndPinned(t *testing.T) {
+	t.Parallel()
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-a",
+			Annotations: map[string]string{
+				MLCSkipDeletionAnnotation: "true",
+			},
+		},
+		Spec: corev1.NodeSpec{Unschedulable: true},
+	}
+	cli := newFakeClient(t, node)
+
+	res := Cordon(context.Background(), cli, node.DeepCopy(), "node-a")
+	if res.Err != nil {
+		t.Fatalf("err = %v", res.Err)
+	}
+	if res.Patched {
+		t.Errorf("want Patched=false (idempotent), got %+v", res)
+	}
+}
+
+// Recovery case: someone (manual ops, a prior controller version) cordoned
+// the node without setting the skipDeletion annotation. NodeMedic re-stamps
+// the annotation on next reconcile so MLC stops trying to rotate it.
+func TestCordon_AddsMissingAnnotationOnAlreadyCordonedNode(t *testing.T) {
 	t.Parallel()
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
@@ -69,8 +98,19 @@ func TestCordon_AlreadyCordoned(t *testing.T) {
 	if res.Err != nil {
 		t.Fatalf("err = %v", res.Err)
 	}
-	if res.Patched {
-		t.Errorf("want Patched=false (idempotent), got %+v", res)
+	if !res.Patched {
+		t.Errorf("want Patched=true (annotation added), got %+v", res)
+	}
+
+	var fresh corev1.Node
+	if err := cli.Get(context.Background(), client.ObjectKey{Name: "node-a"}, &fresh); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got := fresh.Annotations[MLCSkipDeletionAnnotation]; got != "true" {
+		t.Errorf("expected annotation re-stamped, got %q", got)
+	}
+	if !fresh.Spec.Unschedulable {
+		t.Errorf("expected Unschedulable to remain true")
 	}
 }
 

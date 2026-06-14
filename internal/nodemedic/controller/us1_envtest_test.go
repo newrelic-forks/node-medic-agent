@@ -277,6 +277,10 @@ func TestUS1_HappyPath_GatePassCordons(t *testing.T) {
 	if !finalNode.Spec.Unschedulable {
 		t.Errorf("node should be cordoned")
 	}
+	if got := finalNode.Annotations[MLCSkipDeletionAnnotation]; got != "true" {
+		t.Errorf("expected %q annotation = %q on cordoned node, got %q",
+			MLCSkipDeletionAnnotation, "true", got)
+	}
 	if posts := suite.slack.posts.Load(); posts != 1 {
 		t.Errorf("slack posts = %d, want 1", posts)
 	}
