@@ -118,7 +118,7 @@ The resolution functions MUST be unit-tested against fixture `Node` objects from
 ### FR-3 — NHD creation
 The controller MUST `Create` an NHD object with:
 - Name: `<node-name-truncated-to-50-chars>-<unix-ts-seconds>`.
-- Namespace: `container-fabric` (created by Helm if missing).
+- Namespace: `cf-monitoring` (created by Helm if missing).
 - `spec.case.caseId`: a fresh UUIDv4.
 - `spec.case` populated per FR-2 + the trigger Condition payload.
 - `spec.budgets`: `maxTurns=15`, `maxBudgetUSD="0.50"`, `deadline = observedAt + 60s` (RFC3339).
@@ -127,7 +127,7 @@ The controller MUST `Create` an NHD object with:
 The NHD `Create` MUST be idempotent: if a CR with the same name already exists, the controller MUST NOT recreate it and MUST treat the existing CR as the case.
 
 ### FR-4 — Agent invocation
-After NHD `Create`, the controller MUST `POST /diagnose` against the agent service URL (`--agent-url`, default `http://nodemedic-agent.container-fabric.svc:8080/diagnose`) with:
+After NHD `Create`, the controller MUST `POST /diagnose` against the agent service URL (`--agent-url`, default `http://nodemedic-agent.cf-monitoring.svc:8080/diagnose`) with:
 - Bearer token from `Secret/nodemedic-agent-token` mounted as env.
 - Request body matching `nodemedic-scope.md` §3.1 exactly.
 

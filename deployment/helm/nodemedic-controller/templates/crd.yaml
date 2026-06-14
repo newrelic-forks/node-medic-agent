@@ -1,0 +1,25 @@
+{{- if .Values.installCRD -}}
+{{- $_ := include "nodemedic.requireTestCluster" . -}}
+{{/*
+CRD installation, gated by .Values.installCRD. Set installCRD=false if
+Scope 3's chart (or a manual `kubectl apply -f config/nodemedic/crd/`)
+installed the CRD first; either ordering is supported per research R-4.
+
+The annotation `helm.sh/resource-policy: keep` makes `helm uninstall`
+NOT remove the CRD — orphaning live NHD objects would be worse than
+leaving the CRD in place.
+*/}}
+{{/*
+CRD source lives under files/crd/ rather than the special Helm `crds/`
+directory so we can keep the .Values.installCRD toggle (Helm auto-installs
+anything in crds/ unconditionally). The file is symlinked from
+config/nodemedic/crd/ during `make nodemedic-helm-package` to stay in
+sync with controller-gen output.
+*/}}
+{{- $crd := .Files.Get "files/crd/nodemedic.cf.newrelic.com_nodehealthdiagnosisais.yaml" -}}
+{{- if $crd -}}
+{{ $crd }}
+{{- else -}}
+{{ fail "ERROR: chart is missing files/crd/nodemedic.cf.newrelic.com_nodehealthdiagnosisais.yaml; run `make nodemedic-helm-package` (or copy the file from config/nodemedic/crd/) before packaging." }}
+{{- end -}}
+{{- end -}}

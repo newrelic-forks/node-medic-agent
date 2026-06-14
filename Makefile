@@ -372,3 +372,117 @@ goget:
 
 .PHONY: depup
 depup: goget gomod
+
+# =============================================================================
+# NodeMedic controller targets (Scope 2 — AFA 2026 hackathon).
+#
+# Spec: .specify/specs/001-nodemedic-controller/
+# These targets MUST NOT touch the existing NPD targets above. They use the
+# `nodemedic-` prefix and only operate on:
+#   cmd/nodemedic-controller/, api/, internal/nodemedic/,
+#   config/nodemedic/, deployment/helm/nodemedic-controller/,
+#   test/nodemedic/, Dockerfile.nodemedic-controller
+# =============================================================================
+
+NODEMEDIC_BIN ?= bin/nodemedic-controller
+NODEMEDIC_IMG ?= ghcr.io/cf/nodemedic-controller:dev
+NODEMEDIC_HELM_DIR ?= deployment/helm/nodemedic-controller
+NODEMEDIC_PKGS ?= ./api/... ./cmd/nodemedic-controller/... ./internal/nodemedic/...
+
+# Pinned tool versions. Updated together when we bump controller-runtime.
+CONTROLLER_TOOLS_VERSION ?= v0.16.5
+ENVTEST_VERSION ?= release-0.19
+ENVTEST_K8S_VERSION ?= 1.31.0
+
+# Use `go run` so we don't pollute $GOPATH/bin and pin versions per-build.
+CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
+SETUP_ENVTEST  ?= go run sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION)
+
+.PHONY: nodemedic-help
+nodemedic-help:
+	@echo "NodeMedic controller targets:"
+	@echo "  nodemedic-build         build cmd/nodemedic-controller -> $(NODEMEDIC_BIN)"
+	@echo "  nodemedic-generate      run controller-gen object (deepcopy)"
+	@echo "  nodemedic-manifests     run controller-gen crd+rbac (writes config/nodemedic/...)"
+	@echo "  nodemedic-test          go test ./api/... ./cmd/nodemedic-controller/... ./internal/nodemedic/..."
+	@echo "  nodemedic-envtest       run envtest-backed reconciler tests under test/nodemedic/envtest"
+	@echo "  nodemedic-docker-build  build Dockerfile.nodemedic-controller (multi-arch via buildx)"
+	@echo "  nodemedic-helm-lint     helm lint $(NODEMEDIC_HELM_DIR)"
+	@echo "  nodemedic-helm-package  helm package $(NODEMEDIC_HELM_DIR)"
+	@echo "  nodemedic-clean         rm $(NODEMEDIC_BIN)"
+
+.PHONY: nodemedic-build
+nodemedic-build:
+	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w" \
+	  -o $(NODEMEDIC_BIN) ./cmd/nodemedic-controller
+
+.PHONY: nodemedic-generate
+nodemedic-generate:
+	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./api/..."
+
+.PHONY: nodemedic-manifests
+# `crd:allowDangerousTypes=true` is required because the contract schema
+# (.specify/specs/001-nodemedic-controller/contracts/nhd-crd.yaml) uses
+# `type: number` for status.diagnosis.confidence — controller-gen flags
+# float64 fields as "dangerous" by default. The contract is the authority
+# (Constitution Article II.2), so we opt in to numeric encoding.
+#
+# After generation we copy the CRD into the Helm chart's files/crd/ dir
+# so `helm install` ships the same byte-for-byte CRD that controller-gen
+# produced.
+nodemedic-manifests:
+	$(CONTROLLER_GEN) \
+	  crd:allowDangerousTypes=true \
+	  rbac:roleName=nodemedic-controller \
+	  paths="./api/..." \
+	  paths="./internal/nodemedic/..." \
+	  output:crd:artifacts:config=config/nodemedic/crd \
+	  output:rbac:artifacts:config=config/nodemedic/rbac
+	@mkdir -p $(NODEMEDIC_HELM_DIR)/files/crd
+	@cp config/nodemedic/crd/*.yaml $(NODEMEDIC_HELM_DIR)/files/crd/
+	@echo "synced CRD into $(NODEMEDIC_HELM_DIR)/files/crd/"
+
+.PHONY: nodemedic-test
+nodemedic-test:
+	go test -timeout=2m -count=1 $(NODEMEDIC_PKGS)
+
+.PHONY: nodemedic-envtest
+# Integration tests use envtest's binary apiserver+etcd. They live
+# beside the production code under internal/nodemedic/controller/ but
+# are gated by `//go:build integration` so `go test ./...` stays fast.
+nodemedic-envtest:
+	@echo "Setting up envtest assets for Kubernetes $(ENVTEST_K8S_VERSION)..."
+	@$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path >/dev/null
+	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
+	  go test -tags=integration -timeout=5m -count=1 ./internal/nodemedic/controller/...
+
+.PHONY: nodemedic-docker-build
+nodemedic-docker-build:
+	docker buildx build \
+	  -f Dockerfile.nodemedic-controller \
+	  --platform linux/amd64,linux/arm64 \
+	  -t $(NODEMEDIC_IMG) \
+	  .
+
+.PHONY: nodemedic-helm-lint
+nodemedic-helm-lint:
+	helm lint $(NODEMEDIC_HELM_DIR)
+	@echo "Verifying cluster-name guard accepts cf1z (Azure kubeadm)..."
+	helm template $(NODEMEDIC_HELM_DIR) --set clusterName=cf1z >/dev/null
+	@echo "Verifying cluster-name guard accepts test-* (AWS/EKS)..."
+	helm template $(NODEMEDIC_HELM_DIR) --set clusterName=test-odd-wire >/dev/null
+	@echo "Verifying cluster-name guard rejects production-shaped names..."
+	@! helm template $(NODEMEDIC_HELM_DIR) --set clusterName=stg-foo >/dev/null 2>&1 \
+	  && echo "OK: helm template refused stg-foo (Constitution Article I.9)" \
+	  || (echo "FAIL: helm template should reject clusterName=stg-foo per Constitution Article I.9" && exit 1)
+	@! helm template $(NODEMEDIC_HELM_DIR) --set clusterName=us-big-cone >/dev/null 2>&1 \
+	  && echo "OK: helm template refused us-big-cone (Constitution Article I.9)" \
+	  || (echo "FAIL: helm template should reject clusterName=us-big-cone per Constitution Article I.9" && exit 1)
+
+.PHONY: nodemedic-helm-package
+nodemedic-helm-package:
+	helm package $(NODEMEDIC_HELM_DIR) -d $(NODEMEDIC_HELM_DIR)/..
+
+.PHONY: nodemedic-clean
+nodemedic-clean:
+	rm -f $(NODEMEDIC_BIN)

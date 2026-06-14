@@ -1,0 +1,19 @@
+apiVersion: v2
+name: nodemedic-controller
+description: |
+  NodeMedic controller (Scope 2 of the AFA 2026 hackathon). Watches
+  NPD-flipped NodeConditions, drives the diagnosis agent, gates on
+  confidence, and (only) cordons the Node when the gate passes.
+  See .specify/specs/001-nodemedic-controller/ in the source repo.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.28.0-0"
+maintainers:
+  - name: Container Fabric
+    url: https://source.datanerd.us/container-fabric
+keywords:
+  - kubernetes
+  - operator
+  - node-health
+  - nodemedic

@@ -1,0 +1,85 @@
+# Canned NHD CR for the Day-1-AM stub deliverable (Constitution II.3 +
+# research R-14). Apply this to a test cluster to drive the controller
+# through the **gate-pass / cordon / Slack `Applied`** path without the
+# agent being live yet.
+#
+# Usage:
+#   kubectl --context=test-odd-wire -n cf-monitoring apply \
+#     -f test/nodemedic/fixtures/nhd-applied.yaml
+#
+# The controller's reconciler observes phase=Diagnosed and a diagnosis
+# block that satisfies the Constitution Article I.3 gate
+# (confidence >= 0.7, >= 2 distinct sources, action ∈ {Cordon,
+# DrainAndCordon}), then patches Node.spec.unschedulable=true and posts
+# Slack with the Applied builder.
+#
+# The Node referenced in spec.case.nodeName must exist on the cluster
+# and the controller's RBAC must allow patching it. For the demo we
+# pre-provision a sacrificial Node and reuse its name here.
+apiVersion: nodemedic.cf.newrelic.com/v1alpha1
+kind: NodeHealthDiagnosisAI
+metadata:
+  name: ip-10-1-2-3-applied-fixture
+  namespace: cf-monitoring
+spec:
+  case:
+    caseId: 8f3c1e2a-9b4d-4f7a-9c1e-2a9b4d4f7a9c
+    nodeName: ip-10-1-2-3.us-east-2.compute.internal
+    clusterName: test-odd-wire
+    provider: aws
+    region: us-east-2
+    instanceId: i-0abc1234deadbeef
+    trigger:
+      type: ConntrackSaturated
+      reason: ConntrackHigh
+      message: "nf_conntrack_count=262100 max=262144"
+      observedAt: "2026-06-12T15:00:00Z"
+  budgets:
+    maxTurns: 15
+    maxBudgetUSD: "0.50"
+    deadline: "2026-06-12T15:01:00Z"
+status:
+  phase: Diagnosed
+  conditions:
+    - type: AgentInvoked
+      status: "True"
+      reason: Posted
+      message: agent stub fixture; controller did not actually POST /diagnose
+      lastTransitionTime: "2026-06-12T15:00:05Z"
+    - type: ReportReady
+      status: "True"
+      reason: DiagnosisWritten
+      message: hand-canned diagnosis for Day-1-AM stub deliverable
+      lastTransitionTime: "2026-06-12T15:00:35Z"
+  diagnosis:
+    rootCause: |
+      conntrack table exhausted on the node — kube-proxy iptables rules and
+      pod-to-service NAT all funnel through nf_conntrack which is sized for
+      the default 262144 entries. Three independent signals concur: NRQL
+      shows linear growth of conntrack_count over the last hour, ssh sysctl
+      confirms current usage at 99.9% of max, and kubectl shows the
+      kube-proxy pod logging "conntrack table full" warnings.
+    rcaCategory: Conntrack
+    confidence: 0.85
+    evidence:
+      - source: nrql
+        ref: "FROM SystemSample SELECT max(conntrack_count) WHERE hostname = 'ip-10-1-2-3' SINCE 1 hour ago TIMESERIES"
+        result: "linear growth from 180000 to 262100 over 60min"
+        observedAt: "2026-06-12T15:00:20Z"
+      - source: ssh
+        ref: "sysctl net.netfilter.nf_conntrack_count net.netfilter.nf_conntrack_max"
+        result: "net.netfilter.nf_conntrack_count = 262100\nnet.netfilter.nf_conntrack_max = 262144"
+        observedAt: "2026-06-12T15:00:25Z"
+      - source: kubectl
+        ref: "kubectl logs -n kube-system kube-proxy-xxx --tail=50"
+        result: "nf_conntrack: table full, dropping packet (x47 in last 30s)"
+        observedAt: "2026-06-12T15:00:30Z"
+    recommendation:
+      action: Cordon
+      reason: prevent new pods from landing while the table is saturated
+    auditLogRef:
+      objectStore: "s3://nodemedic-audit/dev/8f3c1e2a-9b4d-4f7a-9c1e-2a9b4d4f7a9c.jsonl"
+    modelUsed: claude-opus-4-7
+    turnsUsed: 7
+    costUSD: "0.18"
+    completedAt: "2026-06-12T15:00:35Z"

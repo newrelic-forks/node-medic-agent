@@ -1,0 +1,68 @@
+# Default values for the NodeMedic controller chart.
+# Per Constitution Article I.9, `clusterName` MUST start with `test-`;
+# the chart's _helpers.tpl `nodemedic.requireTestCluster` template will
+# refuse to render if it doesn't.
+
+# REQUIRED. The cluster name passed to the controller via --cluster-name.
+# Must match `^test-` or the install will fail (Constitution Article I.9).
+clusterName: ""
+
+# Controller image.
+image:
+  repository: ghcr.io/cf/nodemedic-controller
+  tag: ""           # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# CRD installation. The chart installs the CRD by default with the
+# helm.sh/resource-policy: keep annotation so `helm uninstall` does not
+# orphan live NHD objects. Set to false if Scope 3's chart (or a manual
+# `kubectl apply -f config/nodemedic/crd/`) installed it first.
+installCRD: true
+
+# Controller flags. Defaults match spec NFR-6 + Constitution Article I.3.
+config:
+  # Comma-separated NodeCondition.type values that trigger case creation.
+  watchedConditions: "ConntrackSaturated,FDExhaustion,PIDExhaustion,InodeExhaustion,DiskFill,DNSPartition,IMDSThrottle"
+  # Confidence-gate thresholds (Constitution Article I.3 — structure is
+  # hard-coded; only thresholds are flag-tunable).
+  minConfidence: 0.7
+  minEvidenceSources: 2
+  # Agent service URL receiving POST /diagnose.
+  agentURL: "http://nodemedic-agent.cf-monitoring.svc:8080/diagnose"
+  # Per (node, condition) debounce window for trigger detection (FR-1).
+  debounceWindow: "30s"
+  # DEMO HELPER ONLY. When true, the controller bypasses the agent
+  # service and pretends every POST /diagnose returns 202 queued.
+  # Use while Scope 3's agent isn't deployed; hand-patch
+  # status.diagnosis via `kubectl apply --subresource=status` to
+  # drive the gate path. NEVER set in production.
+  stubAgent: false
+
+# Secrets the controller mounts as env vars. The Secrets MUST be
+# created out-of-band before installing the chart; the chart only
+# references them.
+secrets:
+  agentTokenSecretName: "nodemedic-agent-token"   # data key: "token"
+  slackWebhookSecretName: "nodemedic-slack"       # data key: "webhook-url"
+
+# Deployment-level knobs.
+replicaCount: 1   # research R-7: no leader election in v1
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Service for the metrics + healthz endpoints.
+service:
+  type: ClusterIP
+  metricsPort: 9443
+  probePort: 8081

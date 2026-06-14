@@ -1,0 +1,33 @@
+# Azure overrides for the NodeMedic controller chart.
+#
+# `cf1z` is the legacy Container Fabric Azure kubeadm test cluster
+# (sister to jc1z / sk1z). Per Constitution Article I.9 it's the only
+# Azure-side name accepted by the chart's cluster-name guard alongside
+# `test-*` AWS/EKS clusters.
+#
+# Apply with:
+#   helm --kube-context=cf1z upgrade --install nodemedic-controller \
+#     ./deployment/helm/nodemedic-controller \
+#     -n cf-monitoring \
+#     -f deployment/helm/nodemedic-controller/values-azure.yaml \
+#     --set clusterName=cf1z
+#
+# `clusterName` is deliberately not defaulted — set it explicitly per
+# install so an accidental file-only override can't bypass the per-
+# cluster guard.
+
+config:
+  agentURL: "http://nodemedic-agent.cf-monitoring.svc:8080/diagnose"
+  # DEMO: Scope 3's agent isn't deployed on cf1z yet — bypass it so
+  # the controller can drive its phase machine without DNS-failing on
+  # nodemedic-agent.cf-monitoring.svc. Flip back to false the moment
+  # the agent service exists in this namespace.
+  stubAgent: true
+
+image:
+  # Hackathon dev image; pushed to a personal Docker Hub repo because
+  # cf-registry.nr-ops.net/container-fabric/* requires CI service-
+  # account credentials we don't have at the laptop. Migrate to
+  # cf-registry once a CI push pipeline is in place.
+  repository: docker.io/shahrelic/hack-2026-nodemedic
+  tag: "dev-cf1z-d215b750"
