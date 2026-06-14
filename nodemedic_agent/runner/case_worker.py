@@ -482,7 +482,48 @@ def _trace_message(msg: Any) -> None:
     reconstructable without parsing the SDK's internal messages.
     """
     msg_type = type(msg).__name__
-    log.debug("sdk_message", message_type=msg_type)
+    fields: dict[str, Any] = {"message_type": msg_type}
+
+    # Surface the bits that explain why a model halted without tool calls.
+    # AssistantMessage carries the actual tool-use blocks + stop reason;
+    # ResultMessage carries the per-call cost + duration + error info.
+    try:
+        if msg_type == "AssistantMessage":
+            blocks = getattr(msg, "content", None) or []
+            block_types = [type(b).__name__ for b in blocks]
+            fields["block_types"] = block_types
+            fields["stop_reason"] = getattr(msg, "stop_reason", None)
+            err = getattr(msg, "error", None)
+            if err:
+                fields["error"] = str(err)[:256]
+            for b in blocks:
+                if type(b).__name__ == "TextBlock":
+                    text = getattr(b, "text", "") or ""
+                    fields["text_preview"] = text[:512]
+                    break
+        elif msg_type == "ResultMessage":
+            for attr in (
+                "subtype",
+                "is_error",
+                "stop_reason",
+                "num_turns",
+                "duration_ms",
+                "duration_api_ms",
+                "total_cost_usd",
+                "api_error_status",
+            ):
+                v = getattr(msg, attr, None)
+                if v is not None:
+                    fields[attr] = v
+            errors = getattr(msg, "errors", None)
+            if errors:
+                fields["errors"] = [str(e)[:256] for e in errors][:5]
+        elif msg_type == "SystemMessage":
+            fields["subtype"] = getattr(msg, "subtype", None)
+    except Exception as exc:  # noqa: BLE001 — never let logging crash the loop
+        fields["trace_error"] = str(exc)[:256]
+
+    log.info("sdk_message", **fields)
 
 
 # ---------------------------------------------------------------------------
