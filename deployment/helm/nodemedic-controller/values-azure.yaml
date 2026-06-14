@@ -30,4 +30,8 @@ image:
   # account credentials we don't have at the laptop. Migrate to
   # cf-registry once a CI push pipeline is in place.
   repository: docker.io/shahrelic/hack-2026-nodemedic
-  tag: "dev-cf1z-d215b750"
+  # Tag follows the merge commit on hackathon-2026/cf1z-baseline
+  # (PR #2 merged 2026-06-14). The merge brought no Go/Dockerfile
+  # changes vs. the previous controller tip — binary is byte-identical
+  # to what built from 63d103a2 (origin/pr/2 head before merge).
+  tag: "dev-cf1z-9e029aa9"
