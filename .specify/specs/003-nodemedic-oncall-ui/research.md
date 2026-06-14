@@ -114,20 +114,22 @@ Format per the spec-kit research template:
 
 ---
 
-## R-5 Kubernetes client choice (controller-runtime split client)
+## R-5 Kubernetes client choice (controller-runtime direct typed client, no informer)
 
-**Decision** Use `sigs.k8s.io/controller-runtime/pkg/client` for the Go client surface. Build a "split client" via `client.New(...)` with the cached informer reading NHDs (list/get) and the direct client writing NHDs/Nodes/Pods/eviction. Scheme registration: `corev1.AddToScheme(scheme)` + `policyv1.AddToScheme(scheme)` + `nodemedicv1alpha1.AddToScheme(scheme)`.
+**Decision** Use `sigs.k8s.io/controller-runtime/pkg/client` for the Go client surface. Build a direct typed `client.Client` via `client.New(...)` with **no informer cache**. Every list and get round-trips the apiserver. Scheme registration: `corev1.AddToScheme(scheme)` + `policyv1.AddToScheme(scheme)` + `nodemedicv1alpha1.AddToScheme(scheme)`.
 
 **Rationale**
 - The controller is already on controller-runtime v0.21.x (verified via `go.sum`); reusing the dep is free.
-- Informer-cached reads on NHDs match the list-view's freshness profile: the informer's resync handles the 30 s auto-refresh shape implicitly. The list view's `GET /api/cases` doesn't even need to round-trip the apiserver — the cache is local.
-- Direct client writes (eviction, annotation patch) are correct: writes shouldn't be eventually-consistent. The split client gives both shapes from one `client.Client`.
+- **FR-24 binds "MUST NOT cache NHD reads beyond a single request."** An informer would introduce a watch-resync staleness window — exactly what the spec rejects. The trade-off is acknowledged in the spec: "slightly chattier, but no staleness."
+- Demo load is bounded: ~5–50 NHDs per LIST, ~5 list-view loads + ~3 detail-view loads + ~2 action clicks per case for one engineer. cf1z's apiserver serves single-digit-ms LIST/GET against this volume. The list-view 30 s auto-refresh adds a `GET /api/cases` per tab per 30 s — negligible.
+- Direct client writes (eviction, annotation patch) were never going to use a cache; the simplification is removing the informer machinery from the read path, not adding anything.
 - Typed client surface (`client.Client.List(ctx, &nhdList)`) is strictly safer than `unstructured.Unstructured` or `dynamic.Interface` — the schema lives in `api/v1alpha1/nodehealthdiagnosisai_types.go` and the compiler catches drift.
 
 **Alternatives**
-- **Raw `client-go` typed client.** Works; requires hand-wiring informers if we want caching. controller-runtime is a thinner, more idiomatic layer over the same primitives.
+- **Split client with cached informer reads.** Faster reads (cache-local), but introduces an FR-24 violation. Rejected.
+- **Raw `client-go` typed client.** Works; controller-runtime is a thinner, more idiomatic layer over the same primitives, and reuses the dep the controller already pulls.
 - **`dynamic.Interface` (untyped).** No compile-time schema check. The agent uses this because Python lacks generated types; Go does have them, so we use them.
-- **`kubectl` exec from the UI pod.** Forks per request; no informer cache; security worse. Out of consideration.
+- **`kubectl` exec from the UI pod.** Forks per request; security worse. Out of consideration.
 
 **Citations** `sigs.k8s.io/controller-runtime` v0.21 client docs; this repo's `cmd/nodemedic-controller/main.go` for client-builder reference; `api/v1alpha1/nodehealthdiagnosisai_types.go` for the typed scheme.
 
@@ -162,7 +164,7 @@ Each entry is a `UIActionEntry` Go struct (data-model.md §3): `{ts, action, act
 
 ## R-7 Drain SSE wire format
 
-**Decision** Per-pod events use unnamed-event SSE (default `event: message`, decoded by `EventSource.onmessage`) with a JSON payload:
+**Decision** Per-pod events use unnamed-event SSE (default `event: message`) with a JSON payload:
 
 ```
 data: {"pod":"foo-abc123","namespace":"default","result":"evicted","detail":""}\n\n
@@ -170,7 +172,7 @@ data: {"pod":"foo-abc123","namespace":"default","result":"evicted","detail":""}\
 
 Result values: `"evicted"` (200 from eviction API), `"skipped"` (filtered out at plan time — DaemonSet, mirror, system-node-critical), `"error"` (apiserver returned a non-200; `detail` carries the error text — e.g. `"would violate PDB foo-pdb"`).
 
-The terminator is a named event (decoded by `EventSource.addEventListener('complete', ...)`):
+The terminator is a named event (`event: complete`):
 
 ```
 event: complete
@@ -178,16 +180,22 @@ data: {"evicted":12,"skipped":3,"errored":1,"durationMs":4523}\n\n
 ```
 
 **Rationale**
-- `EventSource` in browsers has two surfaces: `onmessage` for unnamed events and `addEventListener(type, ...)` for named events. Using `message` for the per-pod stream keeps the JS short; using `complete` for the terminator gives the consumer a clear boundary so we don't have to overload `result` with a sentinel.
+- The action endpoint is `POST /api/cases/{nhd}/actions/drain` (mutating; not safely idempotent under double-fire — the in-flight coalescer in R-13 handles repeat clicks, not the verb shape). Native `EventSource` is **GET-only** by spec — passing `method: "POST"` is not part of its API. The browser must therefore use `fetch(url, {method: "POST"})` and read `response.body.getReader()` (a `ReadableStream`), parsing SSE frames in JS.
+- The on-the-wire SSE format is unchanged from a hypothetical `EventSource` consumer — `event:` and `data:` lines, blank-line frame terminator. The parser is ~40 lines of JS: accumulate UTF-8 decoded chunks, split on `\n\n`, parse each frame's `event:` (default `message`) and `data:` lines, dispatch to `onMessage`/`onComplete` handlers.
+- Using a default-event (`message`) frame for per-pod results keeps the JS dispatcher short; using a named `complete` event gives the consumer a clear boundary so we don't have to overload `result` with a sentinel.
 - JSON payloads are line-safe (the SSE spec requires `data:` lines to not contain newlines unless decoded specially). We sidestep the issue by JSON-encoding without indentation.
 - `Content-Type: text/event-stream` + `Cache-Control: no-cache` + `X-Accel-Buffering: no` on the response — `X-Accel-Buffering: no` defends against any reverse-proxy buffering (none exists on the demo path; included for forward-compat).
+- The auto-reconnect feature `EventSource` would have given us is forfeit. Acceptable because (a) the demo path is `localhost:8080` over `kubectl port-forward` — no proxy, no transient network — and (b) the backend's eviction loop completes server-side regardless of whether the consumer is attached, and writes the audit annotation on completion (spec §5 edge case "user closes tab mid-drain"). The audit annotation is the durable record; the live SSE is a UX affordance.
 
 **Alternatives**
+- **GET `/api/cases/{nhd}/actions/drain` so `EventSource` works.** Violates HTTP method semantics for a state-mutating action and breaks the OpenAPI contract shape used by every other action endpoint. Rejected.
+- **Two-step: POST to start, separate GET to consume the SSE stream.** Doubles the round-trip surface, adds a server-side correlation token, and complicates the in-flight coalescer (R-13). Not worth the saved ~40 lines of JS.
+- **Polyfill (e.g., `event-source-polyfill`, `@microsoft/fetch-event-source`).** Adds a third-party JS dep — spec §0 binds "vanilla HTML/CSS/JS, no framework, no build step, no `node_modules`." Hand-rolled fetch+parser stays under the line.
 - **Single `event: progress` for everything + a `kind` field.** Workable; adds a layer of indirection in the JS consumer for no gain.
 - **WebSocket.** Bidirectional capability the drain endpoint never uses; an SSE response is one-shot, which matches the drain shape.
 - **Long polling.** Inferior latency profile and harder to terminate cleanly.
 
-**Citations** WHATWG Server-Sent Events spec; MDN `EventSource` reference; spec §0 Q11.
+**Citations** WHATWG Server-Sent Events spec (§"Connecting to an event source" — GET-only); MDN `EventSource` reference; MDN `ReadableStream`; spec §0 Q11.
 
 ---
 

@@ -137,6 +137,8 @@ paths:
         Concurrency: up to 3 evictions in flight at once (research R-3). Per-pod events stream in arrival order, not pod-list order. The terminal `event: complete` always fires, even if zero pods were eligible.
 
         If a drain is already in flight on the same node (process-local state), responds `409 Conflict` immediately with the current progress so the UI can show a "drain in progress" indicator (FR-9 G9).
+
+        Browser consumer: this endpoint is POST + SSE. The native `EventSource` API is GET-only by spec, so the browser uses `fetch(url, {method: "POST"})` and reads `response.body.getReader()`, parsing SSE frames in JS. See research R-7 for the parser shape. Server-side wire format (Content-Type, frame layout) is identical to what an `EventSource` consumer would see; only the client API differs.
       operationId: postDrain
       parameters:
         - $ref: '#/components/parameters/NHDName'

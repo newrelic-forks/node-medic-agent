@@ -14,7 +14,7 @@ Entities below map to a Go file under `internal/oncall/...` per the plan's repo 
 
 **Source**: [`api/v1alpha1/nodehealthdiagnosisai_types.go`](../../../api/v1alpha1/nodehealthdiagnosisai_types.go) — typed Go struct. The UI imports this package; no schema duplication.
 
-**Go access**: typed `client.Client` from `sigs.k8s.io/controller-runtime/pkg/client`. The split client serves cached reads (informer-backed) for `List` and `Get` calls, and direct apiserver writes for `Patch` calls.
+**Go access**: typed `client.Client` from `sigs.k8s.io/controller-runtime/pkg/client`. Direct apiserver round-trips for `List`, `Get`, and `Patch` — no informer cache (FR-24: "MUST NOT cache NHD reads beyond a single request").
 
 ### 1.1 Fields the UI reads
 
@@ -263,7 +263,7 @@ type ListPageRow struct {
 
 The `GET /api/cases` JSON endpoint returns `[]ListPageRow` directly (`json.Marshal` on the slice). The list-view JS auto-refresh consumes this shape and re-renders the `<tbody>`.
 
-**Filter rule** (FR-5): `metadata.creationTimestamp >= now - 24h`. Implemented by listing all NHDs in the namespace and filtering in-process. The volume is small (≤ ~50 NHDs at peak demo cadence; informer-cached read — no apiserver round-trip).
+**Filter rule** (FR-5): `metadata.creationTimestamp >= now - 24h`. Implemented by listing all NHDs in the namespace via a direct apiserver call and filtering in-process. The volume is small (≤ ~50 NHDs at peak demo cadence) and the LIST is single-digit-ms on cf1z, so the no-cache shape (FR-24) carries no perceptible cost.
 
 **Sort rule**: `creationTimestamp` descending (newest first).
 
@@ -398,7 +398,7 @@ Headers on the SSE response:
 - `Connection: keep-alive`
 - `X-Accel-Buffering: no` — defends against proxy buffering on demo paths that grow ingress later
 
-After each `Write`, the handler calls `w.(http.Flusher).Flush()` to push the bytes down the wire. `EventSource` in the browser reconnects automatically on transient network blips (mid-event reconnects miss the in-flight pod's result; the audit annotation on completion is still authoritative).
+After each `Write`, the handler calls `w.(http.Flusher).Flush()` to push the bytes down the wire. The browser consumer uses `fetch(url, {method: "POST"})` + `response.body.getReader()` and a hand-rolled SSE-frame parser — not the native `EventSource` API, which is GET-only by spec (research R-7). The `fetch` path forfeits auto-reconnect; for transient network blips mid-stream the audit annotation on completion is still authoritative (the backend completes the eviction loop server-side regardless of whether the consumer is still attached).
 
 ---
 
