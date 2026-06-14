@@ -412,10 +412,28 @@ async def _drive_sdk_loop(
         # reads (the SDK forwards env to the subprocess). The gateway
         # also accepts the same NCT- token via x-api-key — verified
         # empirically on cf1z 2026-06-14.
+        #
+        # CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 is required against
+        # nerd-completion: without it the bundled CLI sends seven beta
+        # flags on the anthropic-beta header (prompt-caching-scope,
+        # context-management, advisor-tool, etc.) and the gateway
+        # responds HTTP 200 with `event: error … invalid beta flag` in
+        # the SSE stream — the CLI then retries for ~3 min until the
+        # controller marks the case Failed{DeadlineExceeded}. Mirrors
+        # the env knob that nova/k8s-agent-claude-sdk uses against the
+        # same gateway. Same lesson, same fix.
         env={
             "ANTHROPIC_BASE_URL": settings.anthropic_base_url,
             "ANTHROPIC_API_KEY": settings.anthropic_auth_token,
             "ANTHROPIC_AUTH_TOKEN": settings.anthropic_auth_token,
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+            "CLAUDE_CLI_TELEMETRY": "false",
+            "CLAUDE_CLI_AUTO_UPDATE": "false",
+            # Avoid leaking parent-Claude-Code session env vars into the
+            # subprocess — verified against nova's reference config.
+            "CLAUDECODE": "",
+            "CLAUDE_CODE_USE_BEDROCK": "",
+            "CLAUDE_CODE_SSE_PORT": "",
         },
         # SDK isolation mode — don't load CLAUDE.md, skills, agents, or
         # any other filesystem state from the agent pod. The runbook IS
