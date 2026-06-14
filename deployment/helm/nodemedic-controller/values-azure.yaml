@@ -25,13 +25,15 @@ config:
   stubAgent: true
 
 image:
-  # Hackathon dev image; pushed to a personal Docker Hub repo because
-  # cf-registry.nr-ops.net/container-fabric/* requires CI service-
-  # account credentials we don't have at the laptop. Migrate to
-  # cf-registry once a CI push pipeline is in place.
-  repository: docker.io/shahrelic/hack-2026-nodemedic
-  # Tag follows the merge commit on hackathon-2026/cf1z-baseline
-  # (PR #2 merged 2026-06-14). The merge brought no Go/Dockerfile
-  # changes vs. the previous controller tip — binary is byte-identical
-  # to what built from 63d103a2 (origin/pr/2 head before merge).
+  # Hackathon dev image. Migrated 2026-06-14 from docker.io/shahrelic/
+  # hack-2026-nodemedic (sshah's personal Docker Hub repo) to the team
+  # cf-registry.nr-ops.net/container-fabric/nodemedic-controller path.
+  # Push works with developer cf-registry credentials (docker login
+  # cf-registry.nr-ops.net + email-as-username); no CI service-account
+  # is required, contrary to an earlier hypothesis.
+  repository: cf-registry.nr-ops.net/container-fabric/nodemedic-controller
+  # Tag follows the merge commit on hackathon-2026/cf1z-baseline (PR #2
+  # merged 2026-06-14). Image was built from this commit on Apple
+  # Silicon via Colima after applying the Dockerfile BUILDPLATFORM fix
+  # (separate commit on this branch).
   tag: "dev-cf1z-9e029aa9"
