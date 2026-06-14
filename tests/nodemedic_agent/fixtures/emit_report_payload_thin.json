@@ -1,0 +1,17 @@
+{
+  "rootCause": "Could not gather sufficient evidence — NR MCP returned errors and SSH timed out. Recommend operator review.",
+  "rcaCategory": "Unknown",
+  "confidence": 0.4,
+  "evidence": [
+    {
+      "source": "kubectl",
+      "ref": "kubectl get node cf1z-general-nodes-2000002 -o yaml",
+      "result": "(condition observed but no further evidence)",
+      "observedAt": "2026-06-13T14:00:30Z"
+    }
+  ],
+  "recommendation": {
+    "action": "NoAction",
+    "reason": "Insufficient evidence for automated cordon decision"
+  }
+}
