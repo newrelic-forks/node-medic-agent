@@ -30,6 +30,8 @@ spec:
             - "--min-evidence-sources={{ .Values.config.minEvidenceSources }}"
             - "--agent-url={{ .Values.config.agentURL }}"
             - "--debounce-window={{ .Values.config.debounceWindow }}"
+            - "--deadline-window={{ .Values.config.deadlineWindow }}"
+            - "--retry-deadline-extension={{ .Values.config.retryDeadlineExtension }}"
             - "--metrics-bind-address=:{{ .Values.service.metricsPort }}"
             - "--health-probe-bind-address=:{{ .Values.service.probePort }}"
             {{- if .Values.config.stubAgent }}

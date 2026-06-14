@@ -33,6 +33,18 @@ config:
   agentURL: "http://nodemedic-agent.cf-monitoring.svc:8080/diagnose"
   # Per (node, condition) debounce window for trigger detection (FR-1).
   debounceWindow: "30s"
+  # Wall-clock budget the agent has to write status.diagnosis from
+  # observedAt. NodeWatcher stamps spec.budgets.deadline = observedAt +
+  # deadlineWindow at case creation; the reconciler goes
+  # Failed{DeadlineExceeded} when now > deadline (modulo one retry, see
+  # retryDeadlineExtension). Bumped from the original 60s to 5m so deeper
+  # diagnoses (multi-probe ssh fan-out, Azure CLI calls, ambiguous
+  # decision trees) don't trip the gate when the model is doing real work.
+  deadlineWindow: "5m"
+  # On a single DeadlineExceeded retry, how far spec.budgets.deadline
+  # gets pushed forward. FR-7 caps retries at 1, so the effective ceiling
+  # is deadlineWindow + retryDeadlineExtension.
+  retryDeadlineExtension: "60s"
   # DEMO HELPER ONLY. When true, the controller bypasses the agent
   # service and pretends every POST /diagnose returns 202 queued.
   # Use while Scope 3's agent isn't deployed; hand-patch

@@ -66,8 +66,22 @@ type options struct {
 	clusterName        string
 	namespace          string
 	debounceWindow     time.Duration
-	metricsAddr        string
-	probeAddr          string
+	// deadlineWindow is the wall-clock budget the agent gets to write
+	// status.diagnosis from observedAt. NodeWatcher stamps
+	// spec.budgets.deadline = observedAt + deadlineWindow at case
+	// creation time. The NHD reconciler watches `now > deadline` while
+	// phase=Diagnosing and goes Failed{DeadlineExceeded} on hit (modulo
+	// one retry, see retryDeadlineExtension). Bumped from the original
+	// 60s to 5m for clusters where probes can run long (Azure CLI hangs,
+	// deep ssh fan-out, ambiguous-pattern decision trees).
+	deadlineWindow time.Duration
+	// retryDeadlineExtension is how much spec.budgets.deadline gets
+	// pushed forward when a case hits DeadlineExceeded with retryCount==0.
+	// FR-7 caps the number of retries at 1; effective wall-clock budget
+	// is therefore deadlineWindow + retryDeadlineExtension.
+	retryDeadlineExtension time.Duration
+	metricsAddr            string
+	probeAddr              string
 	// stubAgent short-circuits POST /diagnose: every call is treated
 	// as 202 `queued` without touching the network. Demo helper for
 	// when Scope 3's agent service isn't deployed yet — the operator
@@ -106,6 +120,8 @@ func run() error {
 		"minConfidence", opts.minConfidence,
 		"minEvidenceSources", opts.minEvidenceSources,
 		"debounceWindow", opts.debounceWindow,
+		"deadlineWindow", opts.deadlineWindow,
+		"retryDeadlineExtension", opts.retryDeadlineExtension,
 	)
 
 	cfg, err := ctrlconfig.GetConfig()
@@ -161,14 +177,15 @@ func run() error {
 	slackCli := notifier.NewSlack(slackWebhook)
 
 	nhdRec := &controller.NHDReconciler{
-		Client:             mgr.GetClient(),
-		Recorder:           mgr.GetEventRecorderFor("nodemedic-controller"),
-		Agent:              agentCli,
-		Slack:              slackCli,
-		MinConfidence:      opts.minConfidence,
-		MinEvidenceSources: opts.minEvidenceSources,
-		ClusterName:        opts.clusterName,
-		Namespace:          opts.namespace,
+		Client:                 mgr.GetClient(),
+		Recorder:               mgr.GetEventRecorderFor("nodemedic-controller"),
+		Agent:                  agentCli,
+		Slack:                  slackCli,
+		MinConfidence:          opts.minConfidence,
+		MinEvidenceSources:     opts.minEvidenceSources,
+		ClusterName:            opts.clusterName,
+		Namespace:              opts.namespace,
+		RetryDeadlineExtension: opts.retryDeadlineExtension,
 	}
 	if err := nhdRec.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup NHD reconciler: %w", err)
@@ -183,7 +200,7 @@ func run() error {
 		Namespace:         opts.namespace,
 		MaxTurns:          15,
 		MaxBudgetUSD:      "0.50",
-		DeadlineWindow:    60 * time.Second,
+		DeadlineWindow:    opts.deadlineWindow,
 	}
 	if err := nodeWatcher.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup node watcher: %w", err)
@@ -227,6 +244,15 @@ func parseFlags() options {
 
 	fs.DurationVar(&opts.debounceWindow, "debounce-window", 30*time.Second,
 		"per (node, condition) debounce window for trigger detection")
+
+	fs.DurationVar(&opts.deadlineWindow, "deadline-window", 5*time.Minute,
+		"wall-clock budget the agent has to write status.diagnosis from observedAt. "+
+			"NodeWatcher stamps spec.budgets.deadline = observedAt + this value at case creation. "+
+			"On DeadlineExceeded the reconciler retries once with --retry-deadline-extension; "+
+			"effective ceiling is deadline-window + retry-deadline-extension.")
+	fs.DurationVar(&opts.retryDeadlineExtension, "retry-deadline-extension", 60*time.Second,
+		"how far spec.budgets.deadline is pushed forward on a single DeadlineExceeded retry. "+
+			"FR-7 caps retries at 1. Set 0 to disable retry-side extension entirely.")
 
 	fs.StringVar(&opts.metricsAddr, "metrics-bind-address", ":9443",
 		"address on which the metrics endpoint binds")
