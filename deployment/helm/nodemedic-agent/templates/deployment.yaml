@@ -21,6 +21,12 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        # fsGroup so kubelet chowns the secret-mounted SSH key to the
+        # pod's gid; with defaultMode 0o440 below the agent (uid 1000)
+        # can then read the key. Without this OpenSSH refuses with
+        # "Load key …: Permission denied" because the file is owned
+        # root:0 mode 400, unreadable to a non-root pod.
+        fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       volumes:
@@ -31,7 +37,11 @@ spec:
         - name: ssh-key
           secret:
             secretName: {{ .Values.secrets.sshKeySecretName }}
-            defaultMode: 0o400
+            # 0o440 = owner read + group read; combined with fsGroup
+            # the pod's gid 1000 has read access. NOT 0o444 — keep the
+            # other-bit unreadable so any sidecar / init that doesn't
+            # share fsGroup can't see the key.
+            defaultMode: 0o440
       containers:
         - name: agent
           image: {{ include "nodemedic-agent.image" . | quote }}

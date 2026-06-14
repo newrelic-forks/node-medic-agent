@@ -215,9 +215,14 @@ typically still running.
    file at that path is the slam-dunk for the shadow-bind-mount fault
    class injected by the chaos cronjob.
 4. **Host-side socket check (corroboration)**: `ssh -i $SSH_KEY_PATH
-   ubuntu@<nodeIp> 'ls -la /run/containerd/containerd.sock; pgrep -fa
-   containerd; systemctl is-active containerd'` — confirms the host's
-   containerd is healthy. The contrast with probe 3 is the diagnosis.
+   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+   -o ConnectTimeout=10 capi@<nodeIp>
+   'ls -la /run/containerd/containerd.sock; pgrep -fa containerd;
+   systemctl is-active containerd'` — confirms the host's containerd is
+   healthy. The contrast with probe 3 is the diagnosis. The login user
+   is `capi` (Cluster API provisions the worker AMI with that account
+   on cf1z's Azure VMSS); not `ubuntu`. The default `<nodeIp>` is the
+   Node's `InternalIP` from `kubectl get node <nodeName>`.
 5. **NRQL containerd metrics**: `SELECT count(*) FROM K8sNodeSample
    WHERE clusterName='<clusterName>' AND nodeName='<nodeName>' SINCE
    15 minutes ago` — sanity check that node-level metrics are still
