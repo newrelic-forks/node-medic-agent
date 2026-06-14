@@ -307,13 +307,17 @@ two.
    capi@<nodeIp> 'systemctl is-active kubelet; pgrep -fa kubelet | head -3'`
    — confirms the kubelet process is up. Pair with probe 4: process up
    AND iptables rule present → injected fault, not real kubelet sickness.
-6. **NRQL kubelet metric drop**: `mcp__nr__execute_nrql_query` with
-   `account_id=1` and `nrql_query="SELECT count(*) FROM K8sNodeSample
-   WHERE clusterName='<clusterName>' AND nodeName='<nodeName>' SINCE 15
-   minutes ago TIMESERIES 1 minute"` — node-level samples should still
-   land because the infra agent doesn't depend on healthz. Compare with
-   `K8sPodSample` for the same node to confirm pod-level metrics are
-   unaffected.
+6. **NRQL kubelet metric drop (REQUIRED for AC-3b)**: call the
+   `mcp__nr__execute_nrql_query` tool directly — DO NOT echo the query
+   via `Bash cat <<EOF` and DO NOT skip this probe even when host-side
+   evidence is overwhelming. Use `account_id=1` and `nrql_query="SELECT
+   count(*) FROM K8sNodeSample WHERE clusterName='<clusterName>' AND
+   nodeName='<nodeName>' SINCE 15 minutes ago TIMESERIES 1 minute"` —
+   node-level samples should still land because the infra agent doesn't
+   depend on healthz. Add an additional NRQL probe against
+   `K8sPodSample` for the same node when pod-level confirmation helps
+   the diagnosis. The result of the MCP call (the row count or the
+   timeseries) goes into `evidence[]` with `source: "nrql"`.
 
 ### Slam-dunk pattern → `rcaCategory: "Kubelet"`
 
@@ -322,7 +326,10 @@ two.
 - Probe 5 shows kubelet `active (running)` AND `pgrep` returns a kubelet
   PID AND
 - Probe 3 shows recent `SyncLoop` / `kubelet_node_status` lines (kubelet
-  is doing real work — only the healthz path is blocked).
+  is doing real work — only the healthz path is blocked) AND
+- Probe 6 (the NRQL `mcp__nr__execute_nrql_query` call) returns at
+  least one row of `K8sNodeSample` for the affected node within the
+  last 15 minutes — confirming infra-agent telemetry is still landing.
 
 This is the chaos cronjob's iptables injection. Confidence ≥ 0.85,
 recommendation `Cordon`, reason: "Kubelet healthz reachable from
@@ -349,13 +356,15 @@ until rule cleared (auto-recovery in <90 s). rcaCategory=Kubelet."
 
 ### Distinct evidence sources for AC-3b
 
-To clear the controller's `>= 2` source gate, your `evidence[]` must
-include at least one entry per category below:
+The AC-3b acceptance criterion explicitly requires three source kinds.
+Your `evidence[]` MUST include at least one entry from EACH category
+below — no substitutions, no Bash-emulating the NRQL call:
 
 - one `kubectl` source (probe 1 or 2),
 - one `ssh` source (probe 3, 4, or 5; probe 4 is the slam-dunk),
-- one `nrql` source (probe 6).
+- one `nrql` source (probe 6, the actual `mcp__nr__execute_nrql_query`
+  tool call — not a Bash heredoc that prints the query string).
 
-Three sources cleanly separated → confidence 0.85+. Two sources with a
-clean slam-dunk → confidence 0.7–0.84. Anything weaker stays below 0.7
-so the controller routes to `HumanInLoop`.
+Three source kinds cleanly separated → confidence 0.85+. Anything
+weaker (e.g. NRQL skipped) stays below 0.7 so the controller routes to
+`HumanInLoop`.
