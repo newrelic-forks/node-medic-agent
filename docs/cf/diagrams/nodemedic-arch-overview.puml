@@ -1,0 +1,59 @@
+@startuml nodemedic-arch-overview
+' NodeMedic — 1000ft architecture view.
+' Five boxes, six arrows. For the full detail (RBAC, tool surface,
+' guardrails, FR-12 race, etc.) see nodemedic-arch.puml.
+
+!pragma layout smetana
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam rectangleBackgroundColor #FAFAFA
+skinparam packageBackgroundColor  #F5F8FF
+skinparam packageBorderColor      #6B8AB8
+
+title NodeMedic — 1000ft view\nDetect · Diagnose · Decide · Notify · Act\n(detail: nodemedic-arch.puml)
+
+' ============================================================
+' Five boxes — one per role
+' ============================================================
+component "**① Detect**\nNPD + custom plugins\n(NodeConditions, deterministic)" as detect
+
+component "**② Diagnose**\nNodeMedic Agent\nClaude · multi-turn loop\nBash + NR MCP (read-only)" as diagnose
+
+component "**③ Decide**\nNodeMedic Controller\nNHD CRD · confidence gate\n(≥0.7 conf · ≥2 sources)\n→ cordon (auto, idempotent)" as decide
+
+component "**④ Notify**\nSlack Block Kit\n(severity-coded)" as notify
+
+component "**⑤ Act**\nOn-Call UI\nUncordon · Drain · Clear-skipDeletion\n(human-confirmed, kube-API direct)" as act
+
+actor "On-call engineer" as eng
+
+' ============================================================
+' Flow — six arrows, numbered for reading order
+' ============================================================
+detect    --> decide   : **A** NodeCondition\nflips True
+decide    --> diagnose : **B** POST /diagnose\n(async)
+diagnose  --> decide   : **C** status.diagnosis\non NHD CR
+decide    --> notify   : **D** gate result →\nApplied · HumanInLoop · Critical
+notify    --> eng      : **E** Slack page +\n"View full diagnosis" button
+eng       --> act      : **F** click through\n→ review + remediate
+
+' ============================================================
+' Single side note — the safety story
+' ============================================================
+note bottom of diagnose
+  Hallucination guardrails (layered):
+   1. emit_report schema validation
+   2. controller confidence gate
+   3. read-only credentials
+      (no mutation possible)
+   4. human review on UI before
+      uncordon / drain
+end note
+
+note bottom of detect
+  Cloud-agnostic — same image,
+  chart, runbook on EKS + Azure
+  kubeadm. Demonstrated on cf1z.
+end note
+
+@enduml

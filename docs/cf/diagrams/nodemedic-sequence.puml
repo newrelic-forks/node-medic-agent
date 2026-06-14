@@ -1,6 +1,11 @@
 @startuml nodemedic-sequence
-' NodeMedic — end-to-end flow across Scopes 1/2/3
-' Sequence diagrams don't need graphviz, no smetana pragma required.
+' NodeMedic — end-to-end flow as implemented for AFA 2026.
+' Demo path on cf1z: chaos-kubelet-unhealthy → NPD detects →
+' controller creates NHD → agent diagnoses → controller gates +
+' cordons → Block Kit Slack → engineer clicks through to UI →
+' Uncordon (or Drain via SSE) → MLC reclaims.
+'
+' Sequence diagrams don't need graphviz; no smetana pragma required.
 skinparam shadowing false
 skinparam sequence {
   ArrowColor #444
@@ -9,80 +14,156 @@ skinparam sequence {
   ParticipantBackgroundColor #FAFAFA
 }
 
-title NodeMedic — controller ↔ agent ↔ CR ↔ cordon\n(target cluster: EKS or kubeadm/Azure;\n example: ConntrackSaturated on node N)
+title NodeMedic — controller ↔ agent ↔ NHD CR ↔ on-call UI ↔ human\n(target: cf1z · Azure kubeadm; example: KubeletUnhealthy on canary node)
 
-actor      "Operator\n(demo)"                              as op
-participant "Worker node N\n(NPD + plugins)"               as npd
-participant "kube-apiserver"                               as api
-participant "NodeMedic controller\n(Scope 2)"              as ctrl
-participant "NodeMedic agent\n(Scope 3)"                   as agent
-participant "MCP tools\n(node-ops · cloud-info · NR)"      as tools
-participant "Slack / PagerDuty"                            as notify
+actor       "Operator\n(demo driver)"                          as op
+participant "Worker node N\n(NPD + plugins)"                    as npd
+participant "kube-apiserver\n+ NHD CRD"                         as api
+participant "NodeMedic Controller\n(Spec 001 · Go)"             as ctrl
+participant "NodeMedic Agent\n(Spec 002 · Python)"              as agent
+participant "Agent tools\n(Bash · NR HTTP MCP · /proc · ssh ·\nkubectl · aws/az · NRQL)" as tools
+participant "Slack\n(Block Kit · severity-coded)"               as slack
+actor       "On-call engineer"                                  as eng
+participant "On-Call UI\n(Spec 003 · Go stdlib)"                as ui
+participant "MLC\n(machine-lifecycle-controller)"               as mlc
 
-== Scope 1 — fault injection & detection ==
-op   -> npd : make inject-conntrack
-npd  -> npd : conntrack.sh exits 1\n(every 10s tick)
-npd  -> api : PATCH /nodes/N/status\nNodeCondition ConntrackSaturated=True
-npd  -> api : POST Event\n{reason:"ConntrackHigh", source:"conntrack-monitor"}
+== 1. Fault injection & deterministic detection ==
 
-== Scope 2 — case creation ==
-api  --> ctrl : watch Node + Event\n(predicate: type ∈ watched-conditions, status=True)
-ctrl -> ctrl : debounce 30s per (node, condition)\ngenerate caseId (UUIDv4)
-ctrl -> api : CREATE NodeHealthDiagnosisAI/<node>-<ts>\nspec.case={...}\nstatus.phase="Pending"
+op   -> npd : kubectl create job\n--from=cronjob/chaos-kubelet-unhealthy
+npd  -> npd : iptables REJECT 127.0.0.1:10248\n(90s shadow window)
+npd  -> npd : check-kubelet-healthz.sh\nexits 1 (every 30s tick)
+npd  -> api : PATCH /nodes/N/status\nNodeCondition KubeletUnhealthy=True
+npd  -> api : POST Event\n(reason=KubeletHealthzFailed)
 
-== Scope 2 → Scope 3 — invoke agent ==
-ctrl -> agent : POST /diagnose\n{caseId, nodeName, clusterName, trigger, budgets}\nAuthorization: Bearer …
-agent --> ctrl : 202 Accepted\n{caseId, status:"queued"}
-ctrl -> api : PATCH NHD status.phase="Diagnosing"\nconditions[AgentInvoked]=True
+== 2. Controller — case creation ==
 
-== Scope 3 — diagnostic loop ==
+api  --> ctrl : watch Node + Event\n(predicate = type ∈ watched-conditions,\n status=True transition)
+ctrl -> ctrl  : debounce 30s per (node, condition)\nresolve provider/region/instanceId\n(labels + spec.providerID)\ngenerate caseId (UUIDv4)
+ctrl -> api   : CREATE NodeHealthDiagnosisAI/<node>-<unix-ts>\nspec.case = {caseId, node, cluster,\n  provider, region, instanceId, trigger}\nspec.budgets = {deadline = observedAt + 5m}\nstatus.phase = "Pending"
+
+== 3. Controller → Agent — invoke (async) ==
+
+ctrl -> agent : POST /diagnose\n{caseId, nodeName, clusterName, trigger,\n provider, region, instanceId, budgets}\nAuthorization: Bearer <token>
+agent --> ctrl : 202 Accepted\n{caseId, status: "queued"}
+ctrl -> api   : PATCH NHD status\nphase="Diagnosing"\ncondition[AgentInvoked]=True
+
+== 4. Agent — diagnostic loop ==
+
 note over agent
-  ClaudeSDKClient with:
-   system_prompt = runbook (cached)
-   permission_mode = default
-   can_use_tool   = allow-list
-   PreToolUse hook → audit JSONL
-   max_turns / max_budget_usd capped
+  Per-case ClaudeSDKClient (fresh — no cross-case state).
+  permission_mode = bypassPermissions.
+  Pre/PostToolUse hooks → structured stdout logs.
+  No agent-side termination ceiling.
+  Provider: nerd-completion gateway.
+   primary  = claude-opus-4-7
+   fallback = claude-sonnet-4-6
 end note
 
-loop until emit_report or budget exhausted
-  agent -> tools : tool call\n(kubectl_get / nrql / ssh_run / read_proc_file /\n cloud_info.describe — AWS or Azure backend\n picked from cluster.provider tag)
-  tools --> agent : result (truncated 4KB)
-  agent -> agent : PreToolUse hook → audit log
+loop until emit_report fires OR model halts
+  agent -> tools : tool call\n(Bash kubectl/ssh/aws/az/proc OR\n NR MCP execute_nrql_query / analyze_entity_logs / ...)
+  tools --> agent : raw result (4KB-truncated for evidence)
+  agent -> agent : PreToolUse + PostToolUse hooks\n→ stdout JSON line per call
 end
 
-agent -> agent : validate ≥2 distinct evidence sources\nbuild diagnosis object
-agent -> api  : UPDATE NHD status\n.diagnosis={rootCause, confidence,\n           evidence[], recommendation}\n.phase="Diagnosed"
+agent -> agent : emit_report (terminal tool)\n  · validate schema (confidence ∈ [0,1],\n    enum rcaCategory, enum action)\n  · build status.diagnosis payload
+agent -> api   : Status().Update\nstatus.diagnosis = {rootCause,\n  rcaCategory, confidence, evidence[],\n  recommendation, modelUsed,\n  completedAt}\nstatus.phase = "Diagnosed"
 
-== Scope 2 — gate & act ==
+== 5. Controller — confidence gate & act ==
+
 api  --> ctrl : watch NHD update
-ctrl -> ctrl : confidenceGate(nhd):\n confidence ≥ 0.7\n ∧ |distinct sources| ≥ 2\n ∧ recommendation ∈ {Cordon, DrainAndCordon}
+ctrl -> ctrl  : confidenceGate(nhd):\n confidence ≥ 0.7\n ∧ |distinct evidence sources| ≥ 2\n ∧ recommendation ∈\n     {Cordon, DrainAndCordon}
 
-alt gate passes
-  ctrl -> api : PATCH Node N\nspec.unschedulable=true
-  api  --> ctrl : ok
-  ctrl -> notify : Slack post → #cf-team-alerts\nPagerDuty trigger (severity=warning,\n  dedup_key=nodemedic-<caseId>)
-  ctrl -> api : PATCH NHD\n.action.decision="Applied"\n.phase="Acted"\nconditions[ActionApplied]=True
-else gate fails
-  ctrl -> notify : PagerDuty trigger\nseverity=critical\nsummary="Needs human review"
-  ctrl -> api : PATCH NHD\n.action.decision="HumanInLoop"\n.phase="Acted"
+alt gate passes (Applied)
+  ctrl -> api  : PATCH Node N\nspec.unschedulable=true\n(cordon — idempotent)
+  api  --> ctrl: ok
+  ctrl -> api  : PATCH NHD status\naction.decision="Applied"\noperation="cordon"\nphase="Acted"
+  ctrl -> slack: Block Kit POST\nheader=🚨 Cordoned: <node> (<cluster>)\nattachment.color=danger\nfields = {Decision, Confidence,\n         Trigger, rcaCategory}\nbutton = "View full diagnosis"\n  → <UI>/cases/<nhd-name>
+else gate fails (HumanInLoop)
+  ctrl -> api  : PATCH NHD status\naction.decision="HumanInLoop"\noperation="noop"\nphase="Acted"
+  ctrl -> slack: Block Kit POST\nheader=⚠️ Needs review: <node> (<cluster>)\nattachment.color=warning\n(same fields + button)
 end
 
-== terminal ==
-op   -> api : kubectl get node N\n(observes SchedulingDisabled)
+== 5'. Late-arrival race (FR-12) — agent finishes after deadline ==
 
-note right of ctrl
-  Phase machine:
-  Pending → Diagnosing → Diagnosed
-  → (Evaluating → Evaluated)?  ← post-hackathon
-  → Acted | Failed (terminal)
+note over ctrl, agent
+  If the agent did not write status.diagnosis before
+  spec.budgets.deadline, the controller marks the NHD
+  Failed (after retry-once is exhausted) and Slack
+  posts a "Critical" message. The agent keeps running
+  with no agent-side cancellation. When emit_report
+  finally fires, the writer detects phase=Failed and
+  REFUSES to overwrite (FR-12) — the controller's
+  decision wins, and the late tool calls live in
+  stdout logs (durable for the pod's lifetime only).
+end note
+
+== 6. Slack → engineer → UI (human-in-the-loop) ==
+
+slack -> eng  : page in #cf-oncall-alerts
+eng   -> ui   : click "View full diagnosis"\n(via kubectl port-forward to localhost:8080)\nGET /cases/<nhd-name>
+ui    -> api  : GET NHD/<name>  + GET Node/<n>  + GET pods\n(direct apiserver reads — FR-24,\n no informer cache)
+ui    --> eng : per-case page renders:\n  · case metadata\n  · rootCause (one paragraph)\n  · evidence list (collapsible)\n  · action history\n     (controller cordon + UI clicks)\n  · 3 action buttons\n     (gated by node state, not phase)
+
+== 7. Engineer chooses next step ==
+
+alt Uncordon (idempotent)
+  eng -> ui  : click Uncordon → confirm modal
+  ui  -> api : PATCH Node\nspec.unschedulable=false
+  ui  -> api : PATCH NHD\nappend ui-action-history entry\n{ts, action:"uncordon",\n actor:"demo-anonymous", result:"ok"}\n(FIFO ring buffer, last-20)
+  ui  --> eng: "ok — node uncordoned"\npage refreshes
+  api --> mlc: watch Nodes (existing reconcile)
+  mlc -> wn  : reclaim VM\n(if skipDeletion not set)
+else Drain (SSE-streamed, PDB-aware)
+  eng -> ui  : click Drain → confirm modal\n(modal lists pods that will be evicted)
+  ui  -> api : LIST pods (filter\n  excl. DaemonSet · mirror ·\n  system-node-critical)
+  loop per pod
+    ui -> api  : CREATE pods/eviction
+    api --> ui : 200 OR 429 (PDB violated)
+    ui -> eng  : SSE event\ndata: {pod, namespace, result, detail}\n(via fetch + ReadableStream)
+  end
+  ui  -> eng : event: complete\ndata: {summary}
+  ui  -> api : PATCH NHD\nappend ui-action-history entry\n{action:"drain",\n result:{evicted, skipped, error}}
+else Clear MLC skipDeletion
+  eng -> ui  : click Clear MLC skipDeletion
+  ui  -> api : PATCH Node\nremove annotation\nmachine-lifecycle.newrelic.com/skipDeletion
+  ui  -> api : PATCH NHD\nappend ui-action-history entry
+  api --> mlc: watch Nodes
+  mlc -> wn  : reclaim VM\n(next reconcile)
+end
+
+ui -> ui : structured stdout JSON log\n{event:"ui_action", ts, action,\n nhd_name, node, actor, result,\n duration_ms}
+
+== 8. Audit / observability surface ==
+
+eng -> api : kubectl get nhd <name> -o yaml
+api --> eng: status.action (controller stamp)\n+ metadata.annotations\n  .ui-action-history (UI clicks)\n→ complete action timeline,\n  no separate audit store
+
+note right of ui
+  RBAC: 4 ClusterRole rules total —
+   nodes get/list/watch/patch
+   pods get/list/watch
+   pods/eviction create
+   nhds get/list/watch/patch
+  No delete. No secrets/configmaps.
+  No HTTP contract back to the
+  controller; UI talks to the
+  apiserver directly.
 end note
 
 note right of agent
-  emit_report is the **terminal tool**:
-  validates schema + evidence count,
-  writes the CR, then ends the loop.
-  Audit JSONL flushed to S3 on exit.
+  Hallucination guardrails (layered):
+   1. emit_report schema validation
+      (confidence range, enums, required
+       fields, evidence non-empty).
+   2. Controller confidence gate
+      (Spec 001 FR-6 — ≥0.7 confidence
+       AND ≥2 distinct evidence sources
+       AND recommendation ∈ {Cordon, ...}).
+   3. Read-only credentials
+      (agent IAM/RBAC/kube-SA/NR token —
+       cannot mutate cluster or cloud).
+   4. Human review on the UI before
+      uncordon/drain.
 end note
 
 @enduml

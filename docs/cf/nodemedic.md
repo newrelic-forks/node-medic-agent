@@ -2,12 +2,18 @@
 
 **Container Fabric · AFA 2026 hackathon**
 **Status:** pre-meeting draft · **Audience:** team kickoff
+**Implementation status (2026-06-14):** Specs 001 / 002 / 003 are code-complete and live on `cf1z`. The pitch and risk register below are preserved for historical context — they predate Spec 003 and the live cf1z deploy. For the *current* shape, see `hackathon-page-2026.md` (judges' page entry) and the updated diagrams below.
 **Diagrams** (PlantUML, render with `plantuml *.puml` or paste into Confluence):
-- `diagrams/nodemedic-arch.puml` — NodeMedic system architecture (read this first)
-- `diagrams/nodemedic-sequence.puml` — End-to-end controller ↔ agent ↔ CR ↔ cordon flow
+- `diagrams/nodemedic-arch-overview.puml` — **1000ft view** (5 boxes / 6 arrows; read this first)
+- `diagrams/nodemedic-arch.puml` — Detail architecture, **as implemented** (Spec 001 + 002 + 003, RBAC, guardrails, FR-12 race)
+- `diagrams/nodemedic-sequence.puml` — End-to-end flow: NPD → controller → agent → gate → Slack → on-call UI → human action
 - `diagrams/npd-block.puml` — NPD per-node block diagram
 - `diagrams/npd-sequence.puml` — NPD detection → apiserver propagation
 - `diagrams/npd-config-flow.puml` — NPD config files → runtime daemons → effects
+
+**Companion docs:**
+- [`hackathon-page-2026.md`](./hackathon-page-2026.md) — paste-ready answers for the AFA 2026 team page (Problem · Why · Solution · Scope · AI approach · Tools · Success · Dependencies)
+- [`nodemedic-scope.md`](./nodemedic-scope.md) — original scope decomposition across captains
 
 ---
 

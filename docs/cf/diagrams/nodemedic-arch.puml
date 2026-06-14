@@ -1,90 +1,168 @@
 @startuml nodemedic-arch
-' NodeMedic — system architecture (cloud-agnostic: EKS + Azure kubeadm)
-' smetana is PlantUML's built-in layout engine — no external graphviz/dot needed.
+' NodeMedic — system architecture (as implemented for AFA 2026)
+' Reflects Spec 001 controller + Spec 002 agent + Spec 003 on-call UI,
+' all live on cf1z (Azure kubeadm). Same image / chart / runbook works
+' on AWS EKS — only credentials change per install.
+'
+' smetana is PlantUML's built-in layout engine — no graphviz needed.
 !pragma layout smetana
 skinparam shadowing false
 skinparam componentStyle rectangle
 skinparam rectangleBackgroundColor #FAFAFA
 skinparam packageBackgroundColor  #F5F8FF
 skinparam packageBorderColor      #6B8AB8
+skinparam noteBackgroundColor     #FFFBEA
+skinparam noteBorderColor         #B59A3B
 
-title NodeMedic — system architecture\n(EKS / AWS  +  kubeadm / Azure)
+title NodeMedic — system architecture (detail view)\nSpec 001 controller · Spec 002 agent · Spec 003 on-call UI\n(deployed on cf1z; cloud-agnostic — EKS / Azure kubeadm)\n\n//Numbered edges trace the end-to-end flow: ① detect → ⑬ reclaim.//\n//For the 1000ft summary see nodemedic-arch-overview.puml.//
+
+legend top left
+=== End-to-end flow (read edges in this order) ===
+**①** NPD plugin flips a NodeCondition + writes Event
+**②** Controller's NodeWatcher sees the transition (debounced)
+**③** Controller CREATEs NHD CR (phase=Pending)
+**④** Controller POSTs /diagnose to agent (async 202)
+**⑤** Agent loop: tool calls (Bash · NR MCP · SDK built-ins)
+   **⑤a** Reasoning via nerd-completion gateway (Opus 4.7)
+**⑥** Tools read from worker / NR (read-only credentials)
+**⑦** emit_report → Status().Update (phase=Diagnosed)
+**⑧** Controller's reconciler runs the confidence gate
+**⑨** Gate-pass → cordon Node (idempotent)
+**⑩** Block Kit Slack post (Applied / HumanInLoop / Critical)
+   **⑩a** On-call engineer pages on Slack
+**⑪** Engineer port-forwards + opens per-case page in UI
+**⑫** Engineer clicks Uncordon / Drain / Clear-skipDeletion
+   **⑫a** UI patches Node + appends ui-action-history annotation
+**⑬** MLC reclaims VM on its next reconcile (existing primitive)
+endlegend
 
 ' ============================================================
-' DETECTION PLANE — runs on every target cluster (EKS or kubeadm)
+' DETECTION PLANE — runs on every target cluster
 ' ============================================================
-package "Target cluster\n(EKS  |  Azure kubeadm)" as cluster {
+package "Target cluster\n(cf1z · Azure kubeadm    |    test-* · EKS)" as cluster {
+
   node "Worker node N" as wn {
-    component "node-problem-detector\n+ CF custom plugins\n(conntrack · fd · pid · inode\n disk · dns · imds)" as npd
+    component "node-problem-detector\nDaemonSet (privileged)\n  · check-containerd.sh   (30s)\n  · check-kubelet-healthz.sh (30s)\n  · §4.2 catalog plugins\n     (conntrack · fd · pid · inode\n      disk · dns · imds — Day 2)" as npd
   }
-  database "kube-apiserver\nNode conditions + Events" as api
-  component "NodeMedic controller\n(Go, controller-runtime;\ninformer on Node + Event;\nreconciler on NHD CR)" as ctrl
 
-  npd  --> api : signal\n(NodeCondition / Event)
-  ctrl ..> api : watch + patch CR
+  database "kube-apiserver\nNode.status.conditions[]\nNodeHealthDiagnosisAI CRs\nEvents" as api
+
+  ' ----------------------------------------------------------
+  ' Spec 001 — controller
+  ' ----------------------------------------------------------
+  package "cf-monitoring namespace" as ns {
+
+    component "NodeMedic Controller\n(Spec 001 · Go · controller-runtime)\n  · NodeWatcher (debounce 30s)\n  · NHDReconciler (phase machine)\n  · ConfidenceGate (≥0.7 · ≥2 sources)\n  · Cordon executor (nodes/patch only)\n  · Block Kit Slack notifier" as ctrl
+
+    ' ----------------------------------------------------------
+    ' Spec 002 — agent
+    ' ----------------------------------------------------------
+    component "NodeMedic Agent\n(Spec 002 · Python · FastAPI · Claude Agent SDK)\n  · POST /diagnose (async 202)\n  · per-case asyncio worker\n  · ClaudeSDKClient PER CASE (no cross-case state)\n  · permission_mode = bypassPermissions\n     (safety = read-only credentials)\n  · Pre/PostToolUse hooks → stdout JSONL\n  · emit_report terminal tool\n     (schema validate + Status().Update)" as agent
+
+    ' ----------------------------------------------------------
+    ' Spec 003 — on-call UI
+    ' ----------------------------------------------------------
+    component "On-Call UI\n(Spec 003 · Go stdlib net/http + html/template)\n  · GET /                 — 24h list view\n  · GET /cases/<nhd>      — per-case detail\n  · POST .../uncordon\n  · POST .../clear-skip-deletion\n  · POST .../drain        — SSE stream\n  · audit → ui-action-history annotation\n     (last-20 FIFO ring buffer)\n  · 4-rule ClusterRole, no delete" as ui
+  }
+
+  npd  --> api : **①** NodeCondition flips True\n+ Event written
+  api  --> ctrl : **②** watch Node + Event\n  (predicate = watched conditions)
+  ctrl --> api : **③** CREATE NHD CR\nphase=Pending
+  ctrl --> agent : **④** POST /diagnose\n(Bearer token, async 202)
+  agent --> api  : **⑦** Status().Update\nstatus.diagnosis = {...}\nphase=Diagnosed
+  api  --> ctrl  : **⑧** watch NHD update\n→ confidence gate
+  ctrl --> wn    : **⑨** spec.unschedulable=true\n(cordon, idempotent)\n— gate-pass only
+  ui   --> api   : **⑪** list / get / patch\n(NHD + Node + Pods + eviction)
 }
 
 ' ============================================================
-' AGENT RUNTIME — single deployment, serves all target clusters
+' AGENT TOOL PLANE — read-only investigation surface
 ' ============================================================
-component "NodeMedic agent\n(Python · Claude Agent SDK)\nFastAPI: POST /diagnose" as agent
-ctrl --> agent : POST /diagnose\n{caseId, node, cluster, trigger}
+package "Agent tool surface (READ-ONLY by credential design)" as tools {
 
-' ============================================================
-' TOOL PLANE — read-only investigation surface
-' ============================================================
-package "MCP servers (read-only)" as mcp {
-  component "Node-Ops\n(in-proc, SDK)\nkubectl · ssh · /proc"  as nodeops
-  component "Cloud-Info\n(in-proc, SDK)"                      as cloudinfo
-  component "New Relic\n(HTTP)\nNRQL · logs · metrics"        as nrmcp
+  component "Bash tool\n(SDK built-in)\n  · kubectl (in-cluster SA)\n  · ssh (hackathon key)\n  · aws / az CLI\n  · /proc, dmesg, journalctl" as bashtool
+
+  component "New Relic MCP server\n(public HTTP MCP)\n  · execute_nrql_query\n  · analyze_entity_logs\n  · analyze_golden_metrics\n  · list_change_events\n  · get_entity / lookup_entity" as nrmcp
+
+  component "SDK built-ins\n(Read · Grep · WebFetch · ...)" as sdkbuiltins
 }
-agent --> mcp : tool calls
 
-' Cloud-Info has two backends, picked from the case's clusterName/provider tag
-package "Cloud backends" as clouds {
-  component "AWS\nec2:DescribeInstanceStatus\nhealth:DescribeEvents" as aws
-  component "Azure\nVM instance view\nResource Health"             as azure
+agent --> bashtool      : **⑤** tool calls\n(multi-turn loop)
+agent --> nrmcp         : **⑤** tool calls
+agent --> sdkbuiltins   : **⑤** tool calls
+bashtool --> wn         : **⑥** kubectl / ssh\n(read-only)
+nrmcp --> [NR account 1\n(staging)] : **⑥** NRQL · logs · metrics
+
+' ============================================================
+' MODEL PROVIDER
+' ============================================================
+package "Model provider" as models {
+  component "nerd-completion gateway\n(internal · ANTHROPIC_BASE_URL)\n  · claude-opus-4-7    (primary)\n  · claude-sonnet-4-6  (fallback)\n  · /readyz availability fallback chain" as nerd
 }
-cloudinfo --> aws
-cloudinfo --> azure
-
-nodeops --> wn : kubectl / ssh\n(read-only allow-list)
-nrmcp   --> [NR account 1\n(staging)]
+agent --> nerd : **⑤a** Anthropic SDK over HTTPS\n(token from Vault)
 
 ' ============================================================
-' ACTION PLANE
+' HUMAN-IN-THE-LOOP PLANE
 ' ============================================================
-component "Cordon executor\n(controller-side,\nconfidence-gated)" as cordon
-agent  --> cordon : status.diagnosis on NHD CR\n(controller reads, gates)
-cordon --> wn     : kubectl cordon N\n(in-cluster RBAC)
+package "Human surface" as humans {
+  actor "On-call engineer" as eng
+  component "Slack #cf-oncall-alerts\n(Block Kit · severity-coded)\n  🚨 Applied   ⚠️ HumanInLoop   ❌ Critical" as slack
+}
 
-component "Notifier" as notify
-cordon --> notify : Slack #cf-team-alerts\nPagerDuty (CF service)
+ctrl --> slack : **⑩** Block Kit POST\n(applied / human-in-loop / critical)
+slack --> eng  : **⑩a** page lands\n(View full diagnosis button)
+eng --> ui : **⑪** kubectl port-forward\n+ click button →\nhttp://localhost:8080/\ncases/<nhd>
+eng --> ui : **⑫** Uncordon · Drain ·\nClear-skipDeletion\n(modal-confirmed)
+
+' ============================================================
+' DOWNSTREAM REMEDIATION (existing platform primitive)
+' ============================================================
+component "MLC\n(machine-lifecycle-controller)\nreclaims VMs whose nodes\nare cordoned + skipDeletion=false" as mlc
+ui  --> wn  : **⑫a** (via api)\nnode.spec.unschedulable=false\n— or — annotation\nmachine-lifecycle.newrelic.com/\nskipDeletion REMOVED
+mlc --> wn  : **⑬** reconcile →\nVM reclaimed
+api --> mlc : watch Nodes
 
 ' ============================================================
 ' Side notes
 ' ============================================================
 note right of agent
-  system_prompt = runbook (prompt-cached)
-  permission_mode = default + allow-list
-  PreToolUse hook → audit JSONL → S3
-  max_turns / max_budget_usd capped
-  primary  = claude-opus-4-7
-  fallback = claude-sonnet-4-6
+  No agent-side termination ceiling
+  (no max_turns, no cost cap,
+   no wall-clock deadline).
+  Spend bounded by API key budget;
+  user-visible duration bounded by
+  the controller's deadline (Spec 001 FR-5).
 end note
 
-note bottom of mcp
-  In-proc MCP servers (Node-Ops, Cloud-Info)
-  expose tools as @tool-decorated Python funcs
-  in the agent process — credentials and the
-  allow-list never leave the runtime.
+note bottom of tools
+  Hackathon-scope simplification
+  (Constitution-bound):
+  no can_use_tool allow-list;
+  no SSH command prefix-match.
+  Safety = least-privilege creds:
+  IAM/RBAC/kube-SA/NR token are
+  all READ-ONLY. Agent kube-SA
+  explicitly lacks nodes/patch.
 end note
 
-note bottom of clouds
-  Cloud backend chosen per case from
-  cluster metadata (provider=aws|azure).
-  Each backend uses a least-privilege
-  read-only IAM role / Service Principal.
+note bottom of humans
+  UI is anonymous behind
+  kubectl port-forward
+  (no SSO, no Ingress, no TLS).
+  Action audit lives on the NHD CR's
+  ui-action-history annotation
+  (last-20 FIFO ring buffer)
+  + structured stdout logs.
+end note
+
+note right of ctrl
+  Confidence gate (binding):
+   confidence ≥ 0.7
+   ∧ |distinct evidence sources| ≥ 2
+   ∧ recommendation ∈
+       {Cordon, DrainAndCordon}
+  Below threshold → HumanInLoop;
+  no auto-cordon. UI still acts.
 end note
 
 @enduml
