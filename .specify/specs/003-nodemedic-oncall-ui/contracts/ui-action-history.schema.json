@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nodemedic.cf.newrelic.com/schemas/ui-action-history.schema.json",
+  "title": "UIActionHistory",
+  "description": "Payload schema for the `nodemedic.cf.newrelic.com/ui-action-history` annotation written by the NodeMedic On-Call UI to the NodeHealthDiagnosisAI custom resource. The annotation value is a JSON-encoded array of UIActionEntry objects, capped at 20 entries (FIFO ring buffer — appending the 21st drops index 0). See spec.md §6 (FR-18, FR-18a) and data-model.md §3.",
+  "type": "array",
+  "minItems": 0,
+  "maxItems": 20,
+  "items": {
+    "$ref": "#/$defs/UIActionEntry"
+  },
+  "$defs": {
+    "UIActionEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ts", "action", "actor", "result"],
+      "properties": {
+        "ts": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC3339 UTC timestamp when the UI invoked the action."
+        },
+        "action": {
+          "type": "string",
+          "enum": ["uncordon", "drain", "clear-skip-deletion"],
+          "description": "Verb the UI invoked."
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Identifier of the human (or system) that initiated the action. For v1 always the literal string `demo-anonymous` per spec §0 Q6 — UI is anonymous behind kubectl port-forward. SSO restoration adds a real user identifier here."
+        },
+        "result": {
+          "type": "string",
+          "enum": ["ok", "reclaimed", "error", "partial"],
+          "description": "High-level outcome. `ok` — action applied. `reclaimed` — node not found at action time (FR-17a). `error` — apiserver returned a non-200 we couldn't recover from. `partial` — drain only; some pods evicted, some skipped/errored. NOTE: the `no-change` idempotent path (already-uncordoned, annotation already cleared) does NOT write an audit entry — see FR-14 / FR-15."
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Human-readable summary line. For drain: `evicted=12 skipped=3 errored=1`. For uncordon: empty. For errors: truncated apiserver error text."
+        }
+      }
+    }
+  },
+  "examples": [
+    [
+      {
+        "ts": "2026-06-14T15:42:11Z",
+        "action": "uncordon",
+        "actor": "demo-anonymous",
+        "result": "ok"
+      }
+    ],
+    [
+      {
+        "ts": "2026-06-14T15:35:02Z",
+        "action": "uncordon",
+        "actor": "demo-anonymous",
+        "result": "ok"
+      },
+      {
+        "ts": "2026-06-14T15:35:18Z",
+        "action": "clear-skip-deletion",
+        "actor": "demo-anonymous",
+        "result": "ok"
+      }
+    ],
+    [
+      {
+        "ts": "2026-06-14T15:42:11Z",
+        "action": "drain",
+        "actor": "demo-anonymous",
+        "result": "partial",
+        "detail": "evicted=12 skipped=3 errored=1"
+      }
+    ],
+    [
+      {
+        "ts": "2026-06-14T15:42:11Z",
+        "action": "uncordon",
+        "actor": "demo-anonymous",
+        "result": "reclaimed",
+        "detail": "node no longer exists (already reclaimed)"
+      }
+    ]
+  ]
+}
