@@ -265,12 +265,97 @@ Three sources → confidence 0.85+. Two sources → confidence 0.7–0.84.
 
 ## KubeletUnhealthy
 
-Decision tree for the kubelet path lands in v1.1 (US3 / T066). For now,
-treat any `KubeletUnhealthy` case as ambiguous: gather a kubectl
-condition view, an SSH `journalctl -u kubelet --since "10 min ago"`
-probe, and an NRQL query for kubelet metrics, then recommend
-`Cordon` with confidence 0.7 if all three corroborate the kubelet is
-non-responsive, else `NoAction` with confidence 0.5.
+NPD's `kubelet-monitor` plugin flips this condition when it cannot reach
+the kubelet's healthz endpoint at `127.0.0.1:10248`. The host's kubelet
+process itself is typically still running — the chaos cronjob's
+signature is an `iptables REJECT` rule on `127.0.0.1:10248` on both the
+INPUT and OUTPUT chains, which blackholes the probe without touching
+the systemd unit. Real kubelet faults look different: process down,
+crashlooping, or stuck on a syscall. The decision tree separates the
+two.
 
-The runbook will get a full decision tree (probes, slam-dunk vs
-ambiguous, `rcaCategory: "Kubelet"` mapping) when US3 lands.
+### Probes (in order)
+
+1. **kubectl confirm**: `kubectl get node <nodeName> -o yaml` — capture
+   the `conditions[?(@.type=='KubeletUnhealthy')]` block. The expected
+   NPD signal is `status=True` with `reason=KubeletHealthzFailed`. The
+   `Ready` condition will usually still be `True` in the early seconds
+   because the node-lease path is independent of healthz.
+2. **kubectl events**: `kubectl get events -n default --sort-by=.lastTimestamp
+   --field-selector involvedObject.name=<nodeName>` to see what NPD or
+   kubelet was logging when the condition flipped (look for
+   `NodeNotReady`, `KubeletHealthzFailed`, image pull failures, or
+   eviction events that point at a different fault class).
+3. **Host-side kubelet log probe (SSH)**: `ssh -i $SSH_KEY_PATH
+   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+   -o ConnectTimeout=10 capi@<nodeIp>
+   'journalctl -u kubelet --since "5 min ago" --no-pager | tail -100'`
+   — if kubelet is healthy and the only fault is a healthz blackhole,
+   this prints normal sync-loop entries (`SyncLoop`, `kubelet_node_status`,
+   pod-worker logs). If kubelet is genuinely sick the same probe surfaces
+   the panic / restart loop / certificate error. Login user is `capi`,
+   not `ubuntu` (Cluster API kubeadm provisions the worker AMI with the
+   `capi` account on cf1z's Azure VMSS). Default `<nodeIp>` is the Node's
+   `InternalIP` from `kubectl get node <nodeName>`.
+4. **Host-side iptables probe (SSH, slam-dunk)**: `ssh … capi@<nodeIp>
+   'sudo iptables -L INPUT -n --line-numbers; sudo iptables -L OUTPUT -n --line-numbers'`
+   — look for `REJECT` rules referencing `127.0.0.1` and dport `10248`
+   on either chain. Either rule alone is enough to break healthz; the
+   chaos cronjob installs both. The presence of either rule is the
+   slam-dunk signature.
+5. **Host-side kubelet process probe (SSH, corroboration)**: `ssh …
+   capi@<nodeIp> 'systemctl is-active kubelet; pgrep -fa kubelet | head -3'`
+   — confirms the kubelet process is up. Pair with probe 4: process up
+   AND iptables rule present → injected fault, not real kubelet sickness.
+6. **NRQL kubelet metric drop**: `mcp__nr__execute_nrql_query` with
+   `account_id=1` and `nrql_query="SELECT count(*) FROM K8sNodeSample
+   WHERE clusterName='<clusterName>' AND nodeName='<nodeName>' SINCE 15
+   minutes ago TIMESERIES 1 minute"` — node-level samples should still
+   land because the infra agent doesn't depend on healthz. Compare with
+   `K8sPodSample` for the same node to confirm pod-level metrics are
+   unaffected.
+
+### Slam-dunk pattern → `rcaCategory: "Kubelet"`
+
+- Probe 4 returns at least one `REJECT` rule on `127.0.0.1` with dport
+  `10248` (INPUT or OUTPUT chain) AND
+- Probe 5 shows kubelet `active (running)` AND `pgrep` returns a kubelet
+  PID AND
+- Probe 3 shows recent `SyncLoop` / `kubelet_node_status` lines (kubelet
+  is doing real work — only the healthz path is blocked).
+
+This is the chaos cronjob's iptables injection. Confidence ≥ 0.85,
+recommendation `Cordon`, reason: "Kubelet healthz reachable from
+process but blackholed by iptables REJECT on 127.0.0.1:10248. Cordon
+until rule cleared (auto-recovery in <90 s). rcaCategory=Kubelet."
+
+### Ambiguous patterns → lower confidence, `rcaCategory` adjusts
+
+- Probe 5 shows kubelet `inactive` or `failed` (`systemctl is-active`
+  returns non-`active`) AND iptables clean: real kubelet fault, not the
+  chaos cronjob. Confidence ≥ 0.7, recommendation `Cordon`,
+  `rcaCategory: "Kubelet"`, reason names the systemd state.
+- Probe 3 shows certificate / TLS errors or panic / OOM in the kubelet
+  log: confidence 0.7, `rcaCategory: "Kubelet"`, recommendation
+  `Cordon`. Quote the error line in the evidence's `result`.
+- Healthz blackholed (probe 4 shows REJECT) BUT probe 3 shows the
+  kubelet log silent / stuck (no SyncLoop entries in the last 60 s):
+  the iptables rule may be a symptom of a separate fault. Confidence
+  0.5–0.6, recommendation `NoAction`, `rcaCategory: "Unknown"`,
+  request manual review.
+- Iptables clean AND kubelet active AND log clean: NPD may be flapping
+  on a transient probe miss. Confidence 0.4, recommendation `NoAction`,
+  `rcaCategory: "Unknown"`.
+
+### Distinct evidence sources for AC-3b
+
+To clear the controller's `>= 2` source gate, your `evidence[]` must
+include at least one entry per category below:
+
+- one `kubectl` source (probe 1 or 2),
+- one `ssh` source (probe 3, 4, or 5; probe 4 is the slam-dunk),
+- one `nrql` source (probe 6).
+
+Three sources cleanly separated → confidence 0.85+. Two sources with a
+clean slam-dunk → confidence 0.7–0.84. Anything weaker stays below 0.7
+so the controller routes to `HumanInLoop`.
