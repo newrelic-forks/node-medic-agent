@@ -69,6 +69,7 @@ pr.env
 Dockerfile
 Dockerfile.windows
 Dockerfile.nodemedic-controller
+Dockerfile.nodemedic-oncall-ui
 
 # Helm chart — not needed at build time (deploy-time artifact)
 deployment/helm

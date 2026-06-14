@@ -1,0 +1,43 @@
+{{- $_ := include "nodemedic-oncall-ui.requireTestCluster" . -}}
+# UI ClusterRole carries exactly four rules per spec FR-21 + research
+# R-9 + Constitution Article I.1. The CI rbac-guard job
+# (.github/workflows/nodemedic-oncall-ui-ci.yml) negates `grep`s on
+# `nodes/(delete|create)`, `secrets`, `configmaps`, `/finalizers`,
+# and the `*` verb so any drift fails the build.
+#
+# Rule 1 — nodes get/list/watch/patch
+#   Read for the per-case page node-state panel + button enablement;
+#   patch for uncordon (spec.unschedulable=false) and clear-skip-deletion
+#   (annotation removal). NO delete, NO create.
+#
+# Rule 2 — pods get/list/watch
+#   Read for the drain pre-flight pod listing.
+#
+# Rule 3 — pods/eviction create
+#   Subresource verb, NOT a pods delete. The eviction subresource is
+#   PDB-respecting and `system-node-critical`-skipping. This is the
+#   single deliberate scope expansion bound in spec §0 Q5 + plan
+#   Constitution-Check Article I.2.
+#
+# Rule 4 — nodemedicv1alpha1 nhds get/list/watch/patch
+#   Read for list + detail; patch for the ui-action-history annotation
+#   on metadata.annotations only. NO status-subresource patch (the
+#   agent owns status writes; data-model.md §1.3).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "nodemedic-oncall-ui.fullname" . }}
+  labels: {{- include "nodemedic-oncall-ui.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: ["nodemedic.cf.newrelic.com"]
+    resources: ["nodehealthdiagnosisais"]
+    verbs: ["get", "list", "watch", "patch"]

@@ -1,0 +1,15 @@
+{{- $_ := include "nodemedic-oncall-ui.requireTestCluster" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nodemedic-oncall-ui.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nodemedic-oncall-ui.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector: {{- include "nodemedic-oncall-ui.selectorLabels" . | nindent 4 }}

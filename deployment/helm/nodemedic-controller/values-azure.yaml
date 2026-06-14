@@ -24,6 +24,19 @@ config:
   # the agent service exists in this namespace.
   stubAgent: true
 
+  # Spec 003 on-call UI integration on cf1z. Until T029 ships, these
+  # env vars are present but unread by the controller binary.
+  # `useBlockKit: true` becomes the live behavior the moment T029
+  # lands; flipping to false is the demo-day rollback to the existing
+  # plain-text Slack format.
+  useBlockKit: true
+  uiBaseURL: "http://localhost:8080"
+  # Display string only — webhook routing lives in the
+  # `nodemedicSlack` Secret. Override at install time with
+  # `--set config.slackChannel='#cf-oncall-alerts'` to surface the
+  # channel that the cf1z webhook actually posts to.
+  slackChannel: "#cf-oncall-alerts"
+
 image:
   # Hackathon dev image. Migrated 2026-06-14 from docker.io/shahrelic/
   # hack-2026-nodemedic (sshah's personal Docker Hub repo) to the team

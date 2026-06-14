@@ -550,3 +550,68 @@ nodemedic-agent-docker-push:
 nodemedic-agent-clean:
 	rm -rf .venv .pytest_cache .ruff_cache .mypy_cache
 	find nodemedic_agent tests/nodemedic_agent -type d -name __pycache__ -prune -exec rm -rf {} +
+
+# ===========================================================================
+# NodeMedic ON-CALL UI (Scope 4 — AFA 2026 hackathon)
+# Spec: .specify/specs/003-nodemedic-oncall-ui/
+#
+# All targets are namespaced with `nodemedic-oncall-ui-` and operate only on:
+#   cmd/nodemedic-oncall-ui/, internal/oncall/, internal/nodemedic/notifier/,
+#   deployment/helm/nodemedic-oncall-ui/, tests/oncall_ui/,
+#   Dockerfile.nodemedic-oncall-ui
+# NPD's existing targets, the controller's `nodemedic-*` targets, and the
+# agent's `nodemedic-agent-*` targets are unchanged.
+# ===========================================================================
+
+NODEMEDIC_ONCALL_UI_BIN ?= bin/nodemedic-oncall-ui
+NODEMEDIC_ONCALL_UI_IMG ?= cf-registry.nr-ops.net/container-fabric/nodemedic-oncall-ui
+NODEMEDIC_ONCALL_UI_HELM_DIR ?= deployment/helm/nodemedic-oncall-ui
+NODEMEDIC_ONCALL_UI_PKGS ?= ./cmd/nodemedic-oncall-ui/... ./internal/oncall/... ./internal/nodemedic/notifier/... ./tests/oncall_ui/...
+NODEMEDIC_ONCALL_UI_FMT_DIRS ?= cmd/nodemedic-oncall-ui internal/oncall tests/oncall_ui
+
+# TAG defaults to dev-cf1z-<shortsha>; override with `make … TAG=…`.
+NODEMEDIC_ONCALL_UI_TAG ?= dev-cf1z-$(shell git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
+
+.PHONY: nodemedic-oncall-ui-help
+nodemedic-oncall-ui-help:
+	@echo "NodeMedic on-call UI (Scope 4) make targets:"
+	@echo "  nodemedic-oncall-ui-test          go vet + gofmt -l + go test against UI packages"
+	@echo "  nodemedic-oncall-ui-helm-lint     helm lint $(NODEMEDIC_ONCALL_UI_HELM_DIR) --set clusterName=cf1z"
+	@echo "  nodemedic-oncall-ui-docker-build  docker buildx build -f Dockerfile.nodemedic-oncall-ui (linux/amd64)"
+	@echo "  nodemedic-oncall-ui-docker-push   docker push $(NODEMEDIC_ONCALL_UI_IMG):$(NODEMEDIC_ONCALL_UI_TAG)"
+	@echo "  nodemedic-oncall-ui-clean         rm $(NODEMEDIC_ONCALL_UI_BIN)"
+
+.PHONY: nodemedic-oncall-ui-test
+# T007: chains go vet + gofmt -l + go test so the Phase 1 smoke gate runs
+# from one entry point. The CI workflow's go-vet-fmt job invokes the same
+# two checks for parity.
+nodemedic-oncall-ui-test:
+	go vet ./cmd/nodemedic-oncall-ui/... ./internal/oncall/...
+	@unformatted="$$(gofmt -l $(NODEMEDIC_ONCALL_UI_FMT_DIRS))"; \
+	  if [ -n "$$unformatted" ]; then \
+	    echo "gofmt: unformatted files:" >&2; \
+	    echo "$$unformatted" >&2; \
+	    exit 1; \
+	  fi
+	go test -timeout=2m -count=1 $(NODEMEDIC_ONCALL_UI_PKGS)
+
+.PHONY: nodemedic-oncall-ui-helm-lint
+nodemedic-oncall-ui-helm-lint:
+	helm lint $(NODEMEDIC_ONCALL_UI_HELM_DIR) --set clusterName=cf1z
+
+.PHONY: nodemedic-oncall-ui-docker-build
+nodemedic-oncall-ui-docker-build:
+	docker buildx build \
+	  -f Dockerfile.nodemedic-oncall-ui \
+	  --platform linux/amd64 \
+	  -t $(NODEMEDIC_ONCALL_UI_IMG):$(NODEMEDIC_ONCALL_UI_TAG) \
+	  --load \
+	  .
+
+.PHONY: nodemedic-oncall-ui-docker-push
+nodemedic-oncall-ui-docker-push:
+	docker push $(NODEMEDIC_ONCALL_UI_IMG):$(NODEMEDIC_ONCALL_UI_TAG)
+
+.PHONY: nodemedic-oncall-ui-clean
+nodemedic-oncall-ui-clean:
+	rm -f $(NODEMEDIC_ONCALL_UI_BIN)

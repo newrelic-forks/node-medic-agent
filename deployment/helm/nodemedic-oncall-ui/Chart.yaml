@@ -1,0 +1,23 @@
+apiVersion: v2
+name: nodemedic-oncall-ui
+description: |
+  NodeMedic on-call UI (Scope 4 of AFA 2026 hackathon). A Go-backed,
+  server-rendered HTML surface that turns NodeHealthDiagnosisAI CRs
+  into a glance-and-act on-call experience: a 24h list view, a
+  per-case detail page, and three action endpoints (uncordon, drain,
+  clear-skipDeletion) that mutate the underlying Node directly via
+  the kube API. Runs only on non-production clusters (Constitution
+  Article I.5).
+  See .specify/specs/003-nodemedic-oncall-ui/ in the source repo.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.28.0-0"
+maintainers:
+  - name: Container Fabric
+    url: https://source.datanerd.us/container-fabric
+keywords:
+  - kubernetes
+  - on-call
+  - node-health
+  - nodemedic

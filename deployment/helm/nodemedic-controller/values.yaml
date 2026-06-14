@@ -52,6 +52,35 @@ config:
   # drive the gate path. NEVER set in production.
   stubAgent: false
 
+  # Spec 003 — on-call UI integration. These three values shape the
+  # Slack post the controller emits on Acted/HumanInLoop/Failed
+  # transitions. They are surfaced as plain env vars on the controller
+  # Deployment (USE_BLOCK_KIT, UI_BASE_URL, SLACK_CHANNEL) so the
+  # controller's flag parser (T029) can pick them up. Until T029 ships,
+  # these env vars are present but unread.
+  #
+  # When `useBlockKit` flips, the controller's reconciler chooses
+  # between the existing plain-text Slack builders (BuildApplied /
+  # BuildHumanInLoop / BuildCritical) and the new Block Kit builders
+  # (BuildBlockKitApplied / BuildBlockKitHumanInLoop /
+  # BuildBlockKitFailed). The Slack post path itself doesn't change.
+  # `false` is the demo-day rollback target.
+  useBlockKit: true
+
+  # Base URL the "View full diagnosis" button in the Block Kit message
+  # points at. Demo path is `kubectl port-forward svc/nodemedic-oncall-ui
+  # 8080:8080` so localhost:8080 is the install default. Public ingress
+  # is post-hackathon hardening.
+  uiBaseURL: "http://localhost:8080"
+
+  # Display string for the Slack channel the controller posts to. The
+  # actual webhook routing lives in the `nodemedicSlack` Secret keyed by
+  # `webhook-url` (see `secrets.slackWebhookSecretName` above); this
+  # string only appears in the controller's startup log line so an
+  # operator running `kubectl logs` can see which channel the running
+  # binary is configured for. Spec 003 FR-4.
+  slackChannel: "#nodemedic-demo"
+
 # Secrets the controller mounts as env vars. The Secrets MUST be
 # created out-of-band before installing the chart; the chart only
 # references them.

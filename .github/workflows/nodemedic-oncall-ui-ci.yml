@@ -1,0 +1,150 @@
+name: nodemedic-oncall-ui-ci
+
+# Path-filtered to UI paths only — keeps NPD's existing CI, the
+# controller's `nodemedic-ci.yml`, and the agent's `nodemedic-agent-ci.yml`
+# out of the way. Image build/push is intentionally NOT in CI for the
+# hackathon — pushing to cf-registry needs developer creds (Colima →
+# cf-registry, verified empirically against the controller and agent
+# image pushes 2026-06-14).
+
+on:
+  pull_request:
+    paths:
+      - 'cmd/nodemedic-oncall-ui/**'
+      - 'internal/oncall/**'
+      - 'internal/nodemedic/notifier/**'
+      - 'deployment/helm/nodemedic-oncall-ui/**'
+      - 'tests/oncall_ui/**'
+      - 'Dockerfile.nodemedic-oncall-ui'
+      - 'Makefile'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/nodemedic-oncall-ui-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: nodemedic-oncall-ui-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run UI unit + integration tests
+        # `make nodemedic-oncall-ui-test` chains go vet + gofmt -l + go test.
+        # The standalone go-vet-fmt job below also runs the same vet+fmt
+        # checks so a green job table makes it obvious which gate tripped.
+        run: make nodemedic-oncall-ui-test
+
+  go-vet-fmt:
+    # T007 smoke gate. Runs go vet and gofmt -l in isolation so a stray
+    # placeholder doc.go drift is surfaced separately from the test job.
+    name: nodemedic-oncall-ui-vet-fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: go vet
+        run: go vet ./cmd/nodemedic-oncall-ui/... ./internal/oncall/...
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l cmd/nodemedic-oncall-ui internal/oncall tests/oncall_ui)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt: unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  helm-lint:
+    name: nodemedic-oncall-ui-helm-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.14.4
+
+      - name: Lint UI chart
+        # Phase 2 (T017–T021) lands the chart's templates. Until they
+        # exist this step is a no-op so Phase 1 PRs aren't artificially
+        # red. Once Phase 2 ships the templates, the --set clusterName
+        # gate is what's actually being validated.
+        run: |
+          if [ -z "$(ls -A deployment/helm/nodemedic-oncall-ui/templates 2>/dev/null | grep -v '^\.gitkeep$')" ]; then
+            echo "::notice::nodemedic-oncall-ui chart templates not yet authored — skipping (Phase 2 lands them)"
+            exit 0
+          fi
+          helm lint deployment/helm/nodemedic-oncall-ui --set clusterName=cf1z
+
+  rbac-guard:
+    # Build-time half of Constitution Articles I.1 + I.2 enforcement.
+    # T072 lands the actual grep body once Phase 5 ships the UI's
+    # ClusterRole template. Until then this job is a structural
+    # placeholder so the workflow shape ships in Phase 1; it auto-
+    # activates the moment T019's clusterrole.yaml lands.
+    name: nodemedic-oncall-ui-rbac-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: RBAC invariants (UI / controller / agent)
+        # The three negated greps land in T072 (Phase 5) — they verify
+        # that:
+        #   - the UI's ClusterRole MUST NOT carry forbidden verbs
+        #     (Article I.1: nodes/delete, nodes/create, secrets,
+        #     configmaps, /finalizers, *)
+        #   - the controller's ClusterRole MUST NOT acquire
+        #     pods/eviction (Article I.2 — drain stays UI-only)
+        #   - the agent's ClusterRole MUST NOT acquire nodes/patch
+        #     (Article I.2 — cordon stays controller-only)
+        # Until the UI's clusterrole.yaml exists, the UI half is a
+        # no-op; the controller and agent halves run unconditionally.
+        run: |
+          set -euo pipefail
+          ui_chart=deployment/helm/nodemedic-oncall-ui/templates/clusterrole.yaml
+          controller_chart=deployment/helm/nodemedic-controller/templates/clusterrole.yaml
+          agent_chart=deployment/helm/nodemedic-agent/templates/clusterrole.yaml
+
+          if [ -f "$ui_chart" ]; then
+            if grep -E 'nodes/(delete|create)|secrets|configmaps|/finalizers|\*' "$ui_chart"; then
+              echo "::error::UI ClusterRole carries a forbidden verb (Article I.1)"
+              exit 1
+            fi
+          else
+            echo "::notice::UI ClusterRole template not yet authored — skipping UI half (T019 lands it)"
+          fi
+
+          if [ -f "$controller_chart" ]; then
+            if grep 'pods/eviction' "$controller_chart"; then
+              echo "::error::Controller ClusterRole acquired pods/eviction (Article I.2)"
+              exit 1
+            fi
+          fi
+
+          if [ -f "$agent_chart" ]; then
+            if grep 'nodes/patch' "$agent_chart"; then
+              echo "::error::Agent ClusterRole acquired nodes/patch (Article I.2)"
+              exit 1
+            fi
+          fi
+
+          echo "RBAC invariants OK"

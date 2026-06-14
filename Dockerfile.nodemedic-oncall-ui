@@ -1,0 +1,81 @@
+# Dockerfile for the NodeMedic on-call UI (Scope 4 of AFA 2026 hackathon).
+#
+# Builds the cmd/nodemedic-oncall-ui binary as a static linux/amd64 image.
+# NPD's existing Dockerfile, Dockerfile.nodemedic-controller, and
+# Dockerfile.nodemedic-agent are unchanged.
+#
+# Build:
+#   docker buildx build \
+#     -f Dockerfile.nodemedic-oncall-ui \
+#     --platform linux/amd64 \
+#     -t cf-registry.nr-ops.net/container-fabric/nodemedic-oncall-ui:dev-cf1z-<sha> \
+#     .
+#
+# Or via the Makefile: `make nodemedic-oncall-ui-docker-build TAG=dev-cf1z-<sha>`.
+#
+# Base image deviation from research R-8:
+# R-8 prescribed `golang:1.24-alpine` for the builder and
+# `gcr.io/distroless/static-debian12:nonroot` for the runtime. We instead
+# mirror the controller's empirically-proven pattern (commit 61865c62 +
+# 28221155 on this branch):
+#
+#   - Builder pulled through cf-registry.nr-ops.net's docker.io mirror so
+#     cf1z and other CF clusters don't depend on docker.io's anonymous-
+#     pull rate-limit at deploy time.
+#   - go.mod requires `go 1.26.0` (line 3) but the cf-registry mirror's
+#     latest tag today is golang:1.25.x; GOTOOLCHAIN=auto lets the
+#     builder download 1.26 on demand. Same fix the controller image
+#     uses (Dockerfile.nodemedic-controller:34).
+#   - Alpine runtime + ca-certificates matches the controller. Distroless
+#     would shave ~5 MB but loses the shell-debug surface; reviewer
+#     cognitive load wins.
+#
+# Templates and static assets ship via embed.FS in the binary (research
+# R-1) — no asset COPY needed in the runtime stage.
+
+FROM --platform=$BUILDPLATFORM cf-registry.nr-ops.net/docker.io/library/golang:1.25 AS builder
+
+ARG TARGETARCH
+ARG TARGETOS=linux
+
+ENV GOPATH=/gopath/
+ENV PATH=$GOPATH/bin:$PATH
+ENV CGO_ENABLED=0
+# Allow on-demand toolchain download — go.mod's `go 1.26` directive may
+# exceed the base image's bundled Go (cf-registry's golang:1.25 ships
+# 1.25.11 today). The official base sets GOTOOLCHAIN=local; override.
+ENV GOTOOLCHAIN=auto
+RUN go version
+
+COPY . /src/
+WORKDIR /src
+
+# Build a fully-static binary; no libsystemd, no glibc dependency. The
+# `-trimpath` and `-buildvcs=false` flags keep the output reproducible
+# and avoid leaking workspace paths into the binary.
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -buildvcs=false \
+      -ldflags="-s -w" \
+      -o /out/nodemedic-oncall-ui \
+      ./cmd/nodemedic-oncall-ui
+
+# Alpine runtime — the UI binary is statically linked (CGO_ENABLED=0)
+# so musl-vs-glibc isn't an issue. ca-certificates aren't strictly
+# needed (the UI talks only to the in-cluster apiserver, which uses the
+# bundle from /var/run/secrets/kubernetes.io/serviceaccount/), but
+# matching the controller image's posture costs ~1 MB and keeps a
+# common base across both Go images.
+FROM cf-registry.nr-ops.net/docker.io/library/alpine:latest AS runtime
+
+LABEL org.opencontainers.image.source="https://source.datanerd.us/container-fabric/node-medic-agent"
+LABEL org.opencontainers.image.title="nodemedic-oncall-ui"
+LABEL org.opencontainers.image.description="On-call UI for NodeMedic NodeHealthDiagnosisAI cases"
+
+RUN apk add --no-cache ca-certificates && \
+    addgroup -g 65532 nonroot && \
+    adduser -D -u 65532 -G nonroot nonroot
+
+COPY --from=builder /out/nodemedic-oncall-ui /usr/local/bin/nodemedic-oncall-ui
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/nodemedic-oncall-ui"]

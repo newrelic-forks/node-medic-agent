@@ -48,6 +48,16 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.slackWebhookSecretName }}
                   key: webhook-url
+            # Spec 003 on-call UI plumbing. The controller binary's flag
+            # parser (T029) binds these env vars to --use-block-kit,
+            # --ui-base-url, --slack-channel. Until T029 ships, the
+            # controller silently ignores them.
+            - name: USE_BLOCK_KIT
+              value: {{ .Values.config.useBlockKit | quote }}
+            - name: UI_BASE_URL
+              value: {{ .Values.config.uiBaseURL | quote }}
+            - name: SLACK_CHANNEL
+              value: {{ .Values.config.slackChannel | quote }}
           ports:
             - name: metrics
               containerPort: {{ .Values.service.metricsPort }}
