@@ -1,0 +1,404 @@
+---
+description: "Task list for NodeMedic On-Call UI + Slack Format Upgrade (Scope 4 of AFA 2026 hackathon)"
+---
+
+# Tasks: NodeMedic On-Call UI + Slack Format Upgrade
+
+**Input**: Design documents from `.specify/specs/003-nodemedic-oncall-ui/`
+
+**Prerequisites**: [`plan.md`](./plan.md), [`spec.md`](./spec.md), [`research.md`](./research.md), [`data-model.md`](./data-model.md), [`contracts/`](./contracts/), [`quickstart.md`](./quickstart.md), [`constitution.md`](../../memory/constitution.md)
+
+**Tests**: Tests are mandatory per user instruction. Every implementation task is preceded by a unit-test task and followed by a cf1z end-to-end gate at meaningful boundaries. No task is "done" until its unit tests are green and the next-up E2E gate has run successfully against real components on cf1z.
+
+**Organization**: Tasks are grouped by user story (mapped from spec §5 + §8 acceptance criteria). Each story is an independently demonstrable increment on cf1z. Phase order follows demo priority: US1 (Slack Block Kit, the entry point) → US2 (UI shell — list + detail) → US3 (Uncordon + Clear-skipDeletion, the headline action) → US4 (Drain, the stretch action) → US5 (Combined action history, the audit polish).
+
+**Working tree**: All paths are repo-relative. UI code lands directly on `hackathon-2026/cf1z-baseline` (per the plan — controller landed via PR #2, agent via PR #3, UI follows the same pattern). Spec-kit artifacts stay at `.specify/specs/003-nodemedic-oncall-ui/`. UI code is namespaced under `cmd/nodemedic-oncall-ui/`, `internal/oncall/`, `deployment/helm/nodemedic-oncall-ui/`, `Dockerfile.nodemedic-oncall-ui`, and `tests/oncall_ui/` so it doesn't collide with NPD's tree, the Spec 001 controller, or the Spec 002 agent.
+
+**Cluster context**: cf1z (Azure kubeadm, k8s 1.33.8). Controller `nodemedic-controller` is deployed in `cf-monitoring` running `dev-cf1z-<sha>` with `--stub-agent=false` (Spec 002 closed). Agent `nodemedic-agent` is deployed in the same namespace with the real Claude Agent SDK loop. Canary node `cf1z-general-nodes-2000002` labeled `canary-chaos-test=true`. Chaos cronjobs `chaos-containerd-unhealthy` and `chaos-kubelet-unhealthy` deployed in `default` namespace. The controller's existing plain-text Slack notifier path is the rollback target; the new Block Kit builders ship behind `config.useBlockKit` (default `true` once US1 lands).
+
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: Can run in parallel (different files, no dependencies on incomplete tasks)
+- **[Story]**: Maps task to a user story (US1, US2, US3, US4, US5). Phase 1/2/Polish tasks have no story tag.
+- File paths are exact; the agent repo root is `/Users/smandyashankar/Downloads/node-medic-agent` (or `~/Downloads/node-medic-agent`).
+
+## User stories (derived from spec §5 + §8)
+
+| ID | Title | Priority | Acceptance criteria |
+|---|---|---|---|
+| US1 | **Slack alert with structured glance and click-through** — Block Kit message with severity emoji, fields grid, and "View full diagnosis" button on every NHD `phase=Acted`/`HumanInLoop`/`Failed` post | **P1 (demo entry point)** | AC-1, AC-2 |
+| US2 | **On-call UI: list and detail browse** — `/` (last 24h, auto-refresh 30 s) and `/cases/<nhd-name>` (case metadata + diagnosis + evidence + node-state-gated action buttons) | **P1 (UI shell)** | AC-3, AC-4, AC-11, AC-12, AC-14a |
+| US3 | **Uncordon + Clear-skipDeletion actions (the demo's headline)** — one-click uncordon and skipDeletion-clear via the kube API; idempotent paths return `no change`; reclaimed-node path returns benign 200; structured stdout log + audit-annotation FIFO ring buffer (N=20) per action | **P1 (headline action)** | AC-5, AC-6, AC-7, AC-9, AC-13, AC-14b, AC-14c, AC-14 |
+| US4 | **Drain action via `pods/eviction` SSE** — confirmation modal lists pods, eviction loop concurrency cap 3, per-pod SSE results, PDB-violation surfaced per-pod (loop continues), in-flight coalescing via `sync.Map[nodeName] *DrainProgress` returns 409 on second click | P2 | AC-8 |
+| US5 | **Combined action-history surfacing** — per-case page merges controller `status.action` + UI annotation entries, sorted by `ts` ascending, distinct actor labels (`controller` vs `UI: demo-anonymous`) | P2 | AC-10 |
+
+**Constitution checkpoints sprinkled through the plan** (mirrors the controller and agent tasks.md pattern):
+- **Article I.1 credential-layer least privilege** — T019 (`ClusterRole` template), T022 (chart render test), T072 (CI rbac-guard job), T093 (captain chart review). The CI grep test (R-12) is the build-time half; AC-12's `auth can-i` checks are the runtime half.
+- **Article I.2 cordon-only stays a controller property** — T019 (UI ClusterRole carries `nodes/patch` + `pods/eviction` but NOT `nodes/delete` or `nodes/create`), T072 (CI grep test asserts the controller chart still has no `pods/eviction` and the agent chart still has no `nodes/patch`). The UI's drain (US4) is the deliberate, captain-acknowledged scope expansion bound in spec §0 Q5 + plan Constitution-Check Article I.2.
+- **Article I.4 every action observable** — T059 (audit annotation) + T060 (structured stdout log), T072 (CI grep test that the audit hooks are wired in every action handler).
+- **Article I.5 non-production clusters only** — T011 (binary `validateClusterName` guard, FR-23), T018 (Helm `_helpers.tpl` `requireTestCluster` accepting `cf1z`/`jc1z`/`sk1z`/`test-*`), T022 (chart render test).
+- **Article II.1 two cross-scope contracts only** — T024/T025 (Block Kit golden bodies match `contracts/slack-block-kit.md` byte-for-byte), T059 (audit annotation matches `contracts/ui-action-history.schema.json`), T043+T044 (UI HTTP surface matches `contracts/oncall-ui-api.yaml`). The UI introduces zero new cross-scope contracts; one new annotation key on an existing CR is a payload-only change (plan Constitution-Check Article II.1).
+- **Article II.2 CRD owned by Spec 001** — process-level (PR review against `api/v1alpha1/`); the UI imports the typed package directly, no schema duplication.
+- **Article III.4 demo-flow priorities** — phase order is US1 → US2 → US3 → US4 → US5 (plan-phase decision PD-1..PD-4 + plan §Constitution-Check Article III.4). Drain (US4) is P2 specifically because the demo's headline is "click → uncordon → MLC reclaim", not "click → drain".
+
+---
+
+## Phase 1: Setup (Shared Infrastructure)
+
+**Purpose**: Bootstrap the UI's filesystem footprint without disturbing NPD, the controller, or the agent. Image build + CI shape + Makefile targets land here. No UI behavior yet.
+
+- [ ] T001 Confirm working tree is on `hackathon-2026/cf1z-baseline` and clean (`git status` reports nothing) before starting Phase 1; if a `hackathon-2026/scope4-oncall-ui` branch is wanted instead, cut it now from `cf1z-baseline` per plan.md and update the working-tree note in this file in the same commit.
+- [ ] T002 Hand-scaffold the directory tree per plan §Project Structure: `cmd/nodemedic-oncall-ui/`, `internal/oncall/{server,handlers,audit,drain,kube,render,slack}/`, `internal/oncall/render/{templates,static}/`, `deployment/helm/nodemedic-oncall-ui/{templates,}/`, `tests/oncall_ui/{unit,integration,fixtures}/`. Each new Go directory gets a placeholder `doc.go` with a one-line package doc comment so `go vet ./...` and `go test ./... -count=1` exit 0 cleanly until Phase 2 lands real code. NPD's `cmd/`, `pkg/`, and `vendor/` trees stay untouched.
+- [ ] T003 [P] Author `Dockerfile.nodemedic-oncall-ui` at repo root per research R-8: three-stage build — (1) builder stage `--platform=$BUILDPLATFORM`, base `golang:1.24-alpine`, runs `go mod download` then `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/nodemedic-oncall-ui ./cmd/nodemedic-oncall-ui`; (2) runtime stage `linux/amd64`, base `gcr.io/distroless/static-debian12:nonroot`, `COPY --from=builder /out/nodemedic-oncall-ui /usr/local/bin/`, `USER 65532:65532`; (3) `ENTRYPOINT ["/usr/local/bin/nodemedic-oncall-ui"]`. Templates and static assets are embedded via `embed.FS` in the binary (R-1) — no asset COPY needed. Image label `org.opencontainers.image.source` points at the agent repo URL. Verify image size target ≤ 30 MB after T045's first build.
+- [ ] T004 [P] Extend top-level `Makefile` with `nodemedic-oncall-ui-help`, `nodemedic-oncall-ui-test`, `nodemedic-oncall-ui-helm-lint`, `nodemedic-oncall-ui-docker-build`, `nodemedic-oncall-ui-docker-push`, `nodemedic-oncall-ui-clean`. Image tag convention `dev-cf1z-$(shell git rev-parse --short=8 HEAD)` matching the controller and agent tagging. Verify NPD's `make test` and the controller's + agent's `nodemedic-*` targets are unchanged via `make -n test`/`make -n nodemedic-build`/`make -n nodemedic-agent-test` diff against the previous commit.
+- [ ] T005 [P] Author `.github/workflows/nodemedic-oncall-ui-ci.yml` per research R-12: path-filtered to UI paths only (`cmd/nodemedic-oncall-ui/**`, `internal/oncall/**`, `internal/nodemedic/notifier/**`, `deployment/helm/nodemedic-oncall-ui/**`, `tests/oncall_ui/**`, `Dockerfile.nodemedic-oncall-ui`, `.github/workflows/nodemedic-oncall-ui-ci.yml`); three parallel jobs (`test` → `go test ./cmd/nodemedic-oncall-ui/... ./internal/oncall/... ./internal/nodemedic/notifier/... ./tests/oncall_ui/...`; `helm-lint` → `helm lint deployment/helm/nodemedic-oncall-ui --set clusterName=cf1z --values deployment/helm/nodemedic-oncall-ui/values-azure.yaml`; `rbac-guard` job per T072 — keep that body in T072 so the workflow ships without the guard until the chart RBAC lands). Pin all action SHAs. Image build/push stays manual for the hackathon (Colima → cf-registry with developer creds, per research R-12).
+- [ ] T006 [P] Extend the controller chart `deployment/helm/nodemedic-controller/values.yaml` + `deployment/helm/nodemedic-controller/values-azure.yaml` with three new keys: `config.useBlockKit: true` (default true once US1 lands; flip to false is the demo-day rollback), `config.uiBaseURL: "http://localhost:8080"` (the port-forward demo path), and `config.slackChannel: "#nodemedic-demo"` (display string only — the actual webhook routing is in the `nodemedic-slack-webhook` Secret, per spec FR-4). Wire all three through the chart's existing `templates/deployment.yaml` env block — plain env vars `USE_BLOCK_KIT`, `UI_BASE_URL`, `SLACK_CHANNEL` so the controller's `cmd/nodemedic-controller/main.go` flag parser (added in T029) can pick them up. Do NOT flip the controller behavior yet; T029 wires the actual call-site switch.
+- [ ] T007 [P] **Phase 1 smoke gate**: extend the CI workflow from T005 with a `go-vet-fmt` job that runs `go vet ./cmd/nodemedic-oncall-ui/... ./internal/oncall/...` and `gofmt -l cmd/nodemedic-oncall-ui internal/oncall tests/oncall_ui | (! grep .)` (empty output → exit 0; any unformatted file → fail). Local rehearsal: same two commands from a clean checkout. The Phase 2 server scaffold (T010+) will fill in the real packages; this gate locks the scaffolding's vet/fmt cleanliness from day 1 so a stray placeholder `doc.go` doesn't drift before unit tests show up. Verify via `make -n nodemedic-oncall-ui-test` (target should chain `go vet` + `gofmt -l` + `go test`).
+
+**Checkpoint**: `go build ./cmd/nodemedic-oncall-ui/...` (will fail loudly until T010 lands real code — fine for now), `go vet ./cmd/nodemedic-oncall-ui/... ./internal/oncall/...` exits 0, `gofmt -l cmd/nodemedic-oncall-ui internal/oncall tests/oncall_ui` produces no output, `helm lint deployment/helm/nodemedic-oncall-ui --set clusterName=cf1z` (chart is empty but `helm lint` should not crash on empty templates dir — gracefully skips), `make -n nodemedic-oncall-ui-help` exits 0. NPD + controller + agent CI workflows untouched.
+
+---
+
+## Phase 2: Foundational (Blocking Prerequisites)
+
+**Purpose**: Server scaffold (stdlib `net/http` + `html/template`), kube-client builder (controller-runtime split client), structured logger, binary-side cluster-name guard, and Helm chart skeleton with the I.5 cluster-name guard + the I.1 minimal RBAC. Everything below blocks every user story. **No US-tagged task may begin until this phase is complete and its E2E gate (T015) has been verified on cf1z.**
+
+### Server scaffold + kube client + logging
+
+- [ ] T010 Author `cmd/nodemedic-oncall-ui/main.go`: parses CLI flags (`--listen-addr`, `--cluster-name`, `--namespace`, `--ui-base-url`, `--log-level`, `--drain-concurrency`, `--audit-buffer-size`) wired from env vars (`LISTEN_ADDR`, `CLUSTER_NAME`, `NAMESPACE`, `UI_BASE_URL`, `LOG_LEVEL`, `DRAIN_CONCURRENCY`, `AUDIT_BUFFER_SIZE`) per data-model.md §9 `Config`; calls `validateClusterName` (T011); builds the kube client (T013); calls `server.New(cfg, kc).Run(ctx)`. Module is intentionally small (≤80 lines) — all wiring lives in `internal/oncall/server/server.go`.
+- [ ] T011 [P] Author `internal/oncall/server/cluster_guard.go`: `validateClusterName(name string) error` accepts only `cf1z`, `jc1z`, `sk1z`, or any string starting with `test-`. Mirrors the controller's `cmd/nodemedic-controller/main.go:validateClusterName` byte-for-byte (FR-23, Constitution Article I.5).
+- [ ] T012 [P] Author `internal/oncall/server/{server.go,render.go,middleware.go}`: `New(cfg, kc) *Server` constructs the `http.ServeMux` with the six routes (`/`, `/api/cases`, `/cases/{nhd}`, `/api/cases/{nhd}/actions/uncordon`, `/api/cases/{nhd}/actions/clear-skip-deletion`, `/api/cases/{nhd}/actions/drain`); `render.go` loads the `embed.FS` templates and exposes `executeList`/`executeDetail` helpers; `middleware.go` wraps every request with access logging (request-id, status, duration), recovery (panics → 500 + structured log), and `Cache-Control: no-store` on the action endpoints. Handlers themselves are stubs that return `http.StatusNotImplemented` until each US fills them in. Logger is `internal/oncall/server/log.go` — JSON-per-line on stdout, RFC3339 UTC `ts`, `level`, `request_id`, optional `nhd_name`/`node` bound via `context.Context`.
+- [ ] T013 [P] Author `internal/oncall/kube/client.go` per research R-5: `BuildClient(cfg) (client.Client, error)` returns a controller-runtime direct typed client (`client.New(...)` — no manager, no informer, no cache, per FR-24). Scheme registration: `corev1.AddToScheme`, `policyv1.AddToScheme`, `nodemedicv1alpha1.AddToScheme`. In-cluster config from `/var/run/secrets/kubernetes.io/serviceaccount/`. Every `List`, `Get`, `Patch`, and `SubResource("eviction").Create` round-trips the apiserver.
+
+### Unit tests for server + kube client
+
+- [ ] T015 [P] Author `tests/oncall_ui/unit/cluster_guard_test.go` — table-driven: `cf1z`, `jc1z`, `sk1z`, `test-foo`, `test-` (empty suffix — accepted as a degenerate boundary, document if rejected) accepted; `""`, `stg-going-plaid`, `us-big-cone`, `eu-lesser-forest`, `production-cluster` rejected with the expected error string. **Must pass before T016.**
+- [ ] T016 [P] Author `tests/oncall_ui/unit/server_routes_test.go` — `httptest.NewServer` against the assembled handler chain; assert each of the six routes returns the expected `Content-Type` (HTML for `/`, `/cases/{nhd}`; JSON for `/api/cases`, the action endpoints; `text/event-stream` for `/api/cases/{nhd}/actions/drain`). Stub handlers can return `501` — the test only locks the route table shape.
+
+### Helm chart skeleton (R-9, R-14)
+
+- [ ] T017 [P] Author `deployment/helm/nodemedic-oncall-ui/Chart.yaml` (apiVersion v2, type application, version 0.1.0, kubeVersion `>=1.28.0-0` matching the controller and agent charts) and `values.yaml` (defaults: `clusterName: ""` deliberately unset so the helper guard fires; `image.repository: cf-registry.nr-ops.net/container-fabric/nodemedic-oncall-ui`, `image.tag: ""`; `replicaCount: 1` with a YAML comment `# Single replica is the design — DrainProgress is process-local, multi-replica needs leader election`; `config.namespace: cf-monitoring`; `config.uiBaseURL: http://localhost:8080`; `config.drainConcurrency: 3`; `config.auditBufferSize: 20`; resource requests `64Mi`/`100m` and limits `256Mi`/`500m` per plan §Performance Goals).
+- [ ] T018 Author `deployment/helm/nodemedic-oncall-ui/templates/_helpers.tpl` per research R-14: copy the `nodemedic-agent.requireTestCluster` macro from `deployment/helm/nodemedic-agent/templates/_helpers.tpl` byte-for-byte, rename to `nodemedic-oncall-ui.requireTestCluster`. Allowlist remains `cf1z`/`jc1z`/`sk1z`/`test-*`. Macro is invoked from every template so `helm template` aborts unconditionally on disallowed `clusterName`.
+- [ ] T019 [P] Author `deployment/helm/nodemedic-oncall-ui/templates/serviceaccount.yaml`, `clusterrole.yaml`, `clusterrolebinding.yaml` per research R-9 (FR-21, AC-12). The `ClusterRole` has exactly four rules: `nodes get/list/watch/patch`; `pods get/list/watch`; `pods/eviction create`; `nodemedic.cf.newrelic.com/nodehealthdiagnosisais get/list/watch/patch`. NO `delete`, NO `create` on `nodes`, NO `*` verb anywhere, NO `secrets`/`configmaps`/`finalizers`/`status` subresource. The chart's rendered `ClusterRole` is the audit surface for AC-12.
+- [ ] T020 [P] Author `deployment/helm/nodemedic-oncall-ui/templates/{deployment,service}.yaml`. Deployment: 1 replica; `runAsNonRoot: true`; `readOnlyRootFilesystem: true` (the binary's `embed.FS` means no writable filesystem needed); drop ALL caps; healthz/readyz probes against `/` and `/api/cases`; env vars wired from chart values per data-model.md §9. Service: `ClusterIP :8080 → :8080` so `kubectl port-forward svc/nodemedic-oncall-ui 8080:8080` is the demo path (FR-19).
+- [ ] T021 [P] Author `deployment/helm/nodemedic-oncall-ui/values-azure.yaml` (cf1z install — same image tag set at install time, no IRSA annotation) and `deployment/helm/nodemedic-oncall-ui/values-eks.yaml` (placeholder for future test-* install). Both reference the same image tag set at install time. The UI is cloud-agnostic (it never calls AWS/Azure SDKs); per-cluster values only differ in the `clusterName` and `image.tag` keys.
+
+### Chart-render + foundational tests
+
+- [ ] T022 Author `tests/oncall_ui/integration/helm_render_test.go` — invokes `helm template ./deployment/helm/nodemedic-oncall-ui --set clusterName=cf1z` via `os/exec`, asserts: `ClusterRole` has the four exact rules from R-9; `ClusterRole` lacks `nodes/delete`, `nodes/create`, `secrets`, `configmaps`, `finalizers`, `*`; `Deployment` runs as nonroot with `readOnlyRootFilesystem`; `requireTestCluster` rejects `clusterName=stg-going-plaid` (chart render fails with the expected error string). Sister test asserts `cf1z`, `jc1z`, `sk1z`, `test-foo` all render successfully. **Must pass before T023.**
+
+### Phase 2 cf1z gate
+
+- [ ] T023 **cf1z gate (Phase 2 → Phase 3)**: deploy nothing yet — verify only that the chart renders, the cluster-name guard works, and `kubectl --context=cf1z get ns cf-monitoring` confirms the target namespace exists with the controller + agent already running. Run: `helm template nodemedic-oncall-ui ./deployment/helm/nodemedic-oncall-ui --values deployment/helm/nodemedic-oncall-ui/values-azure.yaml --set clusterName=cf1z --set image.tag=foo | kubectl --context=cf1z apply --dry-run=server -f -`. Expected: zero errors, zero warnings besides the missing image (image isn't built yet). Confirms RBAC + service shape are accepted by cf1z's apiserver. **Phase 3 cannot start until this gate is green.**
+
+**Checkpoint**: All Phase 1+2 unit tests pass. Helm chart renders with the cf1z guard active. Server scaffold compiles and serves stub responses. The four new RBAC rules are present and minimal. Day 1 setup ready — US1 layers the Slack Block Kit format on top.
+
+---
+
+## Phase 3: User Story 1 — Slack Block Kit format upgrade (Priority: P1) MVP
+
+**Goal**: Extend the controller's existing `internal/nodemedic/notifier/messages.go` with three new Block Kit builder functions (`BuildBlockKitApplied`, `BuildBlockKitHumanInLoop`, `BuildBlockKitFailed`) per `contracts/slack-block-kit.md`. Wire the controller's reconciler call site behind a `--use-block-kit` flag (Helm value `config.useBlockKit`, default `true`). The existing plain-text builders stay alive as the rollback path. The "View full diagnosis" button URL is built by a new `internal/oncall/slack/url.go` helper (single function `BuildCaseURL`, imported by the controller). UI doesn't exist yet — the URL points at `<config.uiBaseURL>/cases/<nhd-name>`, which is dead until US2 ships, but the Slack message format is independently demoable.
+
+**Independent test (E2E gate at end of phase)**: Run quickstart Scenarios A (AC-1) + B (AC-2) on cf1z. The Slack channel receives a Block Kit message with severity emoji + fields grid + button. Clicking the button gives a 404 in the browser (UI not yet deployed) — that's expected and not a US1 regression.
+
+### Tests for User Story 1 (write FIRST, expect to FAIL before implementation)
+
+- [ ] T024 [P] [US1] Author `internal/nodemedic/notifier/testdata/block-kit/{applied,human-in-loop,failed}.json` golden bodies, byte-stable, matching `contracts/slack-block-kit.md` §1, §2, §3 verbatim (placeholder substitutions: node `cf1z-general-nodes-1000007`, cluster `cf1z`, NHD name `cf1z-general-nodes-1000007-1718374200` for Applied; second/third names for HumanInLoop/Failed). These are the contract reference fixtures.
+- [ ] T025 [P] [US1] Author `internal/nodemedic/notifier/messages_blockkit_test.go` — golden tests for each of the three builders. `cmp.Diff` between `json.Marshal(BuildBlockKit*(in))` parsed as `interface{}` and the golden file's parsed-JSON tree (so key-ordering diffs don't trip the test). Covers: Applied (header `🚨 Cordoned`, color `danger`, four fields), HumanInLoop (header `⚠️ Needs review`, color `warning`), Failed (header `❌ Failed`, color `#808080`, fields show `Failure` + `Attempts` instead of `Decision` + `Confidence`). Plus negative tests: empty `UIBaseURL` → error; `Diagnosis` nil for Applied/HumanInLoop → error (only Failed accepts nil); URL-unsafe chars in `NHDName` → builder still emits the URL as-is (Spec 001 name format is path-safe by construction; documented in `contracts/slack-block-kit.md` §URL-shape). **Must pass before T028.**
+- [ ] T026 [P] [US1] Author `internal/oncall/slack/url_test.go` — table-driven `BuildCaseURL`: `("http://localhost:8080", "foo-1234")` → `http://localhost:8080/cases/foo-1234`; trailing slash on base URL is normalized; empty base or empty NHD name → error. **Must pass before T027.**
+- [ ] T026a [P] [US1] Author `internal/nodemedic/controller/reconciler_blockkit_test.go` — table-driven test of the call-site switch added in T029. Inject a `notifierStub` capturing the `[]byte` payload it would post; drive the reconciler against three NHD fixtures (Applied / HumanInLoop / Failed) under both `useBlockKit=true` and `useBlockKit=false`. Assert: with `useBlockKit=true`, payload bytes match the corresponding `BuildBlockKit*` golden from T024 (parsed-JSON tree compare via `cmp.Diff`); with `useBlockKit=false`, payload matches the existing `BuildApplied`/`BuildHumanInLoop`/`BuildCritical` plain-text shape (no `blocks` field). Plus a `Failed` + `useBlockKit=true` case where `BlockKitInput.Failure.Reason` is wired from `nhd.status.conditions[type=ReportReady].reason`. **Must pass before T029.**
+
+### Implementation for User Story 1
+
+- [ ] T027 [P] [US1] Author `internal/oncall/slack/url.go` per research R-10: single function `BuildCaseURL(uiBaseURL, nhdName string) (string, error)` that joins the two with a single `/cases/` separator. Lives in `internal/oncall/slack/` rather than `internal/nodemedic/notifier/` because the URL shape is the UI's concern, even though the caller is the controller (Article II.1 — the package boundary keeps the cross-scope-contract surface honest).
+- [ ] T028 [US1] Author `internal/nodemedic/notifier/messages_blockkit.go` (new file alongside the existing `messages.go`): three builder functions `BuildBlockKitApplied`, `BuildBlockKitHumanInLoop`, `BuildBlockKitFailed` per `contracts/slack-block-kit.md`. Each takes a `BlockKitInput` (data-model.md §6 — same shape as existing `AppliedInput`/`HumanInLoopInput`/`CriticalInput` plus `UIBaseURL`). Each returns `[]byte` (JSON-marshaled Block Kit payload) ready for the existing `(*Slack).Post` path. Field-source mapping per `contracts/slack-block-kit.md` §1.field-source-mapping, §2.notes, §3.field-source-mapping. The header text is `plain_text` (Slack rejects mrkdwn in `header`); the `attachments[].fallback` field carries the same single-sentence string as the top-level `text`. URL is built via `slack.BuildCaseURL` (T027). The existing `BuildApplied`, `BuildHumanInLoop`, `BuildCritical` functions are **NOT deleted** — they stay in `messages.go` as the rollback target for `--use-block-kit=false`.
+- [ ] T029 [US1] Wire the controller's reconciler call site behind a feature flag and emit the FR-4 startup log line. Modify `cmd/nodemedic-controller/main.go` to add three flags: `--use-block-kit` (bool, default `true`, env `USE_BLOCK_KIT`), `--ui-base-url` (string, default `http://localhost:8080`, env `UI_BASE_URL`), `--slack-channel` (string, default `#nodemedic-demo`, env `SLACK_CHANNEL`). Emit a structured-log line at startup naming all three: `{event: "controller_startup", use_block_kit, ui_base_url, slack_channel, ...existing fields}` (FR-4 binds "Visible in the controller's startup log line"). Modify `internal/nodemedic/controller/reconciler.go` (or wherever the Slack post is invoked — verify path via `grep -rn "notifier.Build" cmd/ internal/`) to switch on the flag: `useBlockKit ? BuildBlockKitApplied(...) : BuildApplied(...)` for each of the three terminal-phase paths (`Applied`, `HumanInLoop`, `Failed`). The post path itself (`(*Slack).Post`) does NOT change. The slack channel is a display string only — webhook routing is in the existing `nodemedic-slack-webhook` Secret.
+- [ ] T030 [US1] Verify the controller's chart flag plumbing end-to-end: `helm template ./deployment/helm/nodemedic-controller --set clusterName=cf1z --set config.useBlockKit=true --set config.uiBaseURL=http://localhost:8080 --set config.slackChannel='#cf-oncall-alerts' | grep -E 'USE_BLOCK_KIT|UI_BASE_URL|SLACK_CHANNEL'` shows all three env vars set on the controller's Deployment env block. Symmetric `--set config.useBlockKit=false` flips it. After T032 deploy, `kubectl --context=cf1z -n cf-monitoring logs deploy/nodemedic-controller --tail=20 | jq 'select(.event == "controller_startup")'` shows the line carrying `slack_channel`, `ui_base_url`, `use_block_kit` — confirms FR-4 visibility. Confirms T006's chart wiring matches T029's flag binding.
+
+### Build + push + deploy (US1 cf1z gate)
+
+- [ ] T031 [US1] Run `go test ./internal/nodemedic/notifier/... ./internal/oncall/slack/...` — all green. Build the controller image with the new flag wired: `make nodemedic-build TAG=dev-cf1z-$(git rev-parse --short=8 HEAD)`. Push: `make nodemedic-push TAG=dev-cf1z-$SHA`. (UI image build deferred to T046 — US1 only changes the controller binary.)
+- [ ] T032 [US1] `helm --kube-context=cf1z upgrade nodemedic-controller ./deployment/helm/nodemedic-controller -n cf-monitoring -f deployment/helm/nodemedic-controller/values-azure.yaml --set clusterName=cf1z --set image.tag=dev-cf1z-$SHA --set config.useBlockKit=true --set config.uiBaseURL=http://localhost:8080 --set config.slackChannel='#cf-oncall-alerts' --wait`. Verify `kubectl --context=cf1z -n cf-monitoring rollout status deploy/nodemedic-controller` confirms 1/1 ready. Startup logs show the FR-4 line: `kubectl --context=cf1z -n cf-monitoring logs deploy/nodemedic-controller --tail=20 | jq 'select(.event == "controller_startup")'` returns one line carrying `slack_channel`, `ui_base_url`, `use_block_kit`.
+
+### US1 cf1z E2E gate — quickstart Scenarios A + B
+
+- [ ] T033 [US1] **AC-1 gate** — quickstart Scenario A: `kubectl --context=cf1z create job --from=cronjob/chaos-containerd-unhealthy chaos-containerd-test-A -n default`. Watch the controller log line `event=slack_post block_kit=true` via `kubectl --context=cf1z -n cf-monitoring logs -l app.kubernetes.io/name=nodemedic-controller --tail=200 -f | jq 'select(.event == "slack_post")'`. Verify the Slack channel receives a Block Kit message with: header `🚨 Cordoned: <node> (cf1z)`, `attachment.color=danger` (red side bar), 4-field grid showing Decision/Confidence/Trigger/rcaCategory, primary button "View full diagnosis" linking to `http://localhost:8080/cases/<nhd-name>`, top-level `text` fallback present.
+- [ ] T034 [US1] [P] **AC-2 gate** — quickstart Scenario B: hand-craft a low-confidence diagnosis via `uv run python -m tests.nodemedic_agent.helpers.emit_thin_report --case-id <new-uuid> --nhd-name <new-nhd-name>` (the helper from Spec 002 T072). Verify the Slack message has header `⚠️ Needs review: <node> (cf1z)`, `attachment.color=warning`, same 4-field grid, same button shape.
+- [ ] T035 [US1] **Rollback rehearsal**: `helm upgrade nodemedic-controller … --set config.useBlockKit=false`. Trigger another chaos run. Verify the Slack message reverts to plain-text shape (no `blocks` field, just `text`). Then restore: `--set config.useBlockKit=true`. Confirms the rollback path is one Helm-value flip.
+
+**Checkpoint (US1 done)**: AC-1, AC-2 green on cf1z. The Slack message is the demo's polished entry point. The "View full diagnosis" button URL points at the UI base URL — clicking it 404s today, which is correct (UI ships in US2). **STOP and DEMO if Slack-format alone is the demo target for an early checkpoint.**
+
+---
+
+## Phase 4: User Story 2 — On-Call UI shell: list + detail browse (Priority: P1)
+
+**Goal**: Stand up the UI's two HTML pages (`GET /` and `GET /cases/{nhd}`), the JSON list endpoint (`GET /api/cases`), and the read-only data plumbing from the kube API to `html/template`. No actions yet — buttons render but POST handlers return `501`. Auto-refresh is `setInterval(_, 30000)` against `/api/cases`. Evidence list collapsibles, status banners, button enablement booleans (FR-9a) all surface from the SSR pass.
+
+**Independent test (E2E gate at end of phase)**: quickstart Scenarios C (AC-3) + D (AC-4) + Scenario M dry-run for AC-14a (button enablement banner without action POST) on cf1z. Plus AC-11 (chart cluster-name guard) and AC-12 (RBAC review) which are install-time gates that fire as soon as the UI is deployed.
+
+### Tests for User Story 2 (write FIRST)
+
+- [ ] T036 [P] [US2] Author `tests/oncall_ui/fixtures/{nhd_applied,nhd_human_in_loop,nhd_pending_diagnosing,nhd_node_reclaimed,nhd_audit_full_buffer}.yaml` per plan §Project Structure. Five hand-crafted NHD CRs covering: cordoned + skipDeletion-stamped node (the demo's headline shape); HumanInLoop with low confidence; phase=Diagnosing with no diagnosis yet (FR-9a banner); node-reclaimed (FR-17a); 20 pre-existing audit entries (FR-18a boundary). Used by integration tests in this phase and US3+US4.
+- [ ] T037 [P] [US2] Author `tests/oncall_ui/unit/data_compose_test.go` — pure-function tests for `composeListPageRow(nhd) ListPageRow` and `composeDetailPageData(nhd, node) DetailPageData` per data-model.md §4 + §5. Asserts: `RowClass` derives correctly for each phase/decision combo (FR-8); `Confidence` is `-1` when diagnosis is nil; `EvidenceView.Collapsible` is true iff `len(Result) > 800` (FR-10); button enablement booleans follow live node state, not phase (FR-9a) — Uncordon enabled iff `NodeUnschedulable`; ClearSkipDeletion enabled iff `NodeHasSkipDeletion`; Drain enabled iff `NodeExists`; reclaimed-node fixture (T036) flips all three to false. **Must pass before T040.**
+- [ ] T038 [P] [US2] Author `tests/oncall_ui/integration/list_handler_test.go` — `httptest.NewServer` against the assembled handler chain with `controller-runtime/pkg/client/fake` seeded from the five fixtures. Asserts: `GET /` returns 200 with HTML containing all five rows sorted by `creationTimestamp` desc; `GET /api/cases` returns 200 with JSON shape per `contracts/oncall-ui-api.yaml` `ListPageRow`; the JSON length matches the HTML row count; the apiserver-unavailable path (fake client returning a connection error) returns 200 with the FR-13 error banner inline. **Must pass before T041.**
+- [ ] T039 [P] [US2] Author `tests/oncall_ui/integration/detail_handler_test.go` — drives `GET /cases/{nhd}` against each fixture: applied → all three buttons enabled, no banner; HumanInLoop → all three enabled, no banner; pending → "Diagnosis in progress" banner, buttons enabled by node state (per FR-9a); reclaimed → "Node was reclaimed by MLC" banner + all three buttons disabled; missing-NHD → "Case not found" panel with HTTP 200 (FR-12); apiserver-unavailable → error banner with HTTP 200 (FR-13). **Must pass before T041.**
+
+### Implementation for User Story 2
+
+- [ ] T040 [US2] Author `internal/oncall/render/data.go` per data-model.md §4 + §5: types `ListPageRow`, `DetailPageData`, `TriggerView`, `DiagnosisView`, `EvidenceView`, `RecommendationView`, `ActionHistoryRow`. Pure functions `composeListPageRow(nhd) ListPageRow` and `composeDetailPageData(nhd, node) DetailPageData`. Sort the list slice by `CreatedAt` desc. Filter to `creationTimestamp >= now - 24h` (FR-5). Action-history merge logic for `composeDetailPageData` is partial here (just the controller's `status.action`) — UI annotation entries are merged in US5 (T079).
+- [ ] T041 [P] [US2] Author `internal/oncall/render/templates/{layout,list,detail,_action_history}.html.tmpl` per plan §Project Structure. `layout.html.tmpl` is the shared `<head>` + `<body>` shell. `list.html.tmpl` renders the table from `[]ListPageRow` with FR-7 columns and FR-8 row highlighting (CSS classes `row-applied`/`row-human-in-loop`/`row-failed`/`row-neutral`). `detail.html.tmpl` renders `DetailPageData` — case metadata block, trigger block, diagnosis block, evidence list (each `<details>` collapsed by default if `EvidenceView.Collapsible`), action history section (placeholder for US5), three action buttons with `disabled` + `title=` attributes driven by the booleans. Status banner (`PhaseBannerKind`) appears above the action buttons block per FR-9a. `_action_history.html.tmpl` is the partial used by both the SSR detail page and any future action-completed re-render. All templates use `html/template` auto-escaping (research R-1) — no `template.HTML` casts on LLM-authored evidence content.
+- [ ] T042 [P] [US2] Author `internal/oncall/render/static/{styles.css,list.js}`. `styles.css` is a single ~150-line stylesheet — clean default typography, `.row-applied/.row-human-in-loop/.row-failed/.row-neutral` color classes (FR-8), banner CSS for `phase-banner` + `reclaimed-banner` + `error-banner`, button `disabled` styling, `.evidence-collapsible` summary affordance. `list.js` is the auto-refresh consumer (research R-4): `setInterval(refreshList, 30000)` calling `GET /api/cases`, re-rendering the `<tbody>` via template literals; `document.visibilityState === "hidden"` pauses the timer; `visibilitychange` listener resumes on focus. Stays under 80 lines. Both are loaded into the binary via `embed.FS` from `internal/oncall/render/static/`.
+- [ ] T043 [US2] Author `internal/oncall/handlers/list.go` (FR-5..FR-8): `GET /` reads NHDs from the namespace, filters to last 24h via `composeListPageRow` (T040), renders `list.html.tmpl`. `GET /api/cases` is the same data shape, JSON-encoded (returns `[]ListPageRow`). Both share a single `listCases(ctx) []ListPageRow` helper. Apiserver-unavailable failure path returns 200 with the FR-13 error banner inline (or a JSON error envelope on `/api/cases`).
+- [ ] T044 [US2] Author `internal/oncall/handlers/detail.go` (FR-9..FR-13): `GET /cases/{nhd}` parses the path parameter, `Get`s the NHD directly from the apiserver (per FR-24), `Get`s the referenced Node directly (NotFound → reclaimed banner, FR-17a render shape; missing NHD → "Case not found" panel, FR-12), composes `DetailPageData` via T040's pure function, renders `detail.html.tmpl`. The helper `nodeReclaimed(node, err) bool` lives here for now — US3's action handlers also use it (refactor to `internal/oncall/handlers/helpers.go` in T053).
+
+### Build + push + deploy (US2 cf1z gate)
+
+- [ ] T045 [US2] Run `go test ./cmd/nodemedic-oncall-ui/... ./internal/oncall/... ./tests/oncall_ui/...` (all green). Build the UI image (first build): `make nodemedic-oncall-ui-docker-build TAG=dev-cf1z-$SHA`; verify image size ≤ 30 MB per research R-8 target.
+- [ ] T046 [US2] `make nodemedic-oncall-ui-docker-push TAG=dev-cf1z-$SHA`. Confirm push completes without auth prompts (developer cf-registry creds, verified empirically against the controller image push).
+- [ ] T047 [US2] `helm --kube-context=cf1z upgrade --install nodemedic-oncall-ui ./deployment/helm/nodemedic-oncall-ui -n cf-monitoring -f deployment/helm/nodemedic-oncall-ui/values-azure.yaml --set clusterName=cf1z --set image.tag=dev-cf1z-$SHA --set config.uiBaseURL=http://localhost:8080 --wait`. Verify `kubectl --context=cf1z -n cf-monitoring get deploy nodemedic-oncall-ui` shows 1/1 ready. Startup logs show `event=startup_complete listen_addr=:8080 cluster_name=cf1z drain_concurrency=3 audit_buffer_size=20`.
+
+### US2 cf1z E2E gate — quickstart Scenarios C + D + M dry-run
+
+- [ ] T048 [US2] **AC-3 gate** — quickstart Scenario C: pre-populate cf1z with at least 3 NHDs (run `chaos-containerd-unhealthy` 3 times across an hour, or hand-craft via `kubectl apply` of three fixtures). `kubectl --context=cf1z -n cf-monitoring port-forward svc/nodemedic-oncall-ui 8080:8080 &`. Open `http://localhost:8080/`. Verify table renders all 3 sorted newest first; columns Created/Node/Cluster/Trigger/Phase/Decision/Confidence/View; auto-refresh fires every 30 s (visible in browser devtools Network tab as a `GET /api/cases` request).
+- [ ] T049 [US2] [P] **AC-4 gate** — quickstart Scenario D: from the Block Kit message produced in T033, click the "View full diagnosis" button. Browser opens `http://localhost:8080/cases/<nhd-name>`. Verify per-case page renders all FR-9 sections: case metadata, trigger metadata, diagnosis (rootCause, rcaCategory, confidence, modelUsed, completedAt, recommendation), evidence list (longer entries collapsed by default with "show more" toggle), action history with one row "Cordon (controller, ...)", three action buttons (Uncordon enabled — node is cordoned; Drain enabled; ClearSkipDeletion enabled — controller stamped the annotation alongside cordon).
+- [ ] T050 [US2] [P] **AC-14a dry-run gate** — quickstart Scenario M (read-only half): trigger a chaos run, refresh the per-case page during the ~30 s window where `phase ∈ {Pending, Diagnosing}`. Verify "Diagnosis in progress" banner appears; Uncordon and Clear-skipDeletion buttons remain enabled (node is already cordoned by NPD-driven preemptive logic in some paths — verify against actual cf1z behavior; if the node is uncordoned during this window, document the observed shape and confirm the buttons follow live state). Action POSTs are still 501 — full AC-14a closes in US3 (T060).
+- [ ] T051 [US2] [P] **AC-11 gate** — quickstart Scenario J: `helm template ./deployment/helm/nodemedic-oncall-ui --set clusterName=stg-going-plaid 2>&1` exits non-zero with the constitution error string; `--set clusterName=cf1z` exits 0 silently; `--set clusterName=test-foo` exits 0; `--set clusterName=` (empty) exits non-zero.
+- [ ] T052 [US2] [P] **AC-12 gate** — quickstart Scenario K: `helm template … --set clusterName=cf1z | yq 'select(.kind == "ClusterRole")'` shows the four exact rules. Plus runtime `kubectl --context=cf1z -n cf-monitoring auth can-i …` checks: `delete nodes` → no; `patch nodes` → yes; `create pods/eviction` → yes; `get secrets` → no; `delete pods` → no.
+
+**Checkpoint (US2 done)**: AC-3, AC-4, AC-11, AC-12, AC-14a (read-only half) green on cf1z. The Slack-click-through path is end-to-end alive — the message lands, the engineer clicks, the per-case page renders. Buttons are visible but POSTs return 501. **The demo's narrative is reachable up through "engineer reads the diagnosis."**
+
+---
+
+## Phase 5: User Story 3 — Uncordon + Clear-skipDeletion actions (Priority: P1) — the demo's headline
+
+**Goal**: Wire the two simpler action endpoints (`POST /api/cases/{nhd}/actions/uncordon`, `POST /api/cases/{nhd}/actions/clear-skip-deletion`). Idempotent paths return `{result: "already X (no change)"}` and skip the audit annotation write. Reclaimed-node path (FR-17a) returns 200 with the benign body and writes one audit entry. Defensive belt (FR-17) returns 400 on node-mismatch. Audit annotation is a JSON-encoded array on the NHD CR, capped at 20 entries (FIFO ring buffer per FR-18a). Structured stdout log line per action (FR-18). Confirmation modals + button POST + page refresh wired in `detail.js`.
+
+**Independent test (E2E gate at end of phase)**: quickstart Scenarios E (AC-5), F (AC-6 idempotent), G (AC-7), I (AC-9 + the audit-history shape from US3's perspective), L (AC-13), M (AC-14a full), N (AC-14b ring-buffer cap), O (AC-14c reclaimed), and P (AC-14 demo finale walkthrough — partial coverage; full demo finale needs US4 drain too).
+
+### Tests for User Story 3 (write FIRST)
+
+- [ ] T053 [P] [US3] Author `internal/oncall/handlers/helpers.go` (extract from T044's local helper): `validateNodeMatchesCase(ctx, c, nhd, node) error` — returns nil if `nhd.spec.case.nodeName == node.metadata.name`, else `ErrNodeMismatch` (FR-17 defensive belt). `nodeReclaimed(node, err) bool` — returns true iff err is k8s NotFound on the Node Get. Both pure-ish (read kube but no writes).
+- [ ] T054 [P] [US3] Author `tests/oncall_ui/unit/audit_ringbuffer_test.go` — table-driven `appendEntry` per data-model.md §3 + research R-6: empty annotation + append → 1 entry; 19 entries + append → 20 entries; 20 entries + append → 20 entries (oldest dropped from front, newest at end); 25 entries (degenerate input from a buggy past write) + append → 20 entries (oldest 6 dropped); each entry's JSON shape conforms to `contracts/ui-action-history.schema.json`; idempotent path (no-change) writes nothing — assertion: `appendEntry(annotations, …, write=false)` is a no-op. **Must pass before T057.**
+- [ ] T055 [P] [US3] Author `tests/oncall_ui/unit/handlers_validate_test.go` — table-driven `validateNodeMatchesCase`: matching node → nil; mismatched node → `ErrNodeMismatch`; missing case ref on NHD → error. Plus `nodeReclaimed`: NotFound err → true; nil err → false; other err → false. **Must pass before T056.**
+- [ ] T056 [P] [US3] Author `tests/oncall_ui/integration/action_uncordon_test.go` — `httptest.NewServer` with `controller-runtime/pkg/client/fake` seeded from fixtures: cordoned-node fixture → POST returns 200 `{result: "ok"}`, fake client now has `node.spec.unschedulable=false`, NHD annotation has 1 new entry. Already-uncordoned fixture → POST returns 200 `{result: "already uncordoned (no change)"}`, NHD annotation length unchanged (FR-14 idempotent — no audit write). Reclaimed-node fixture → POST returns 200 `{result: "node no longer exists (already reclaimed)"}`, NHD annotation has 1 new entry with `result: "reclaimed"` (FR-17a). Mismatch fixture (hand-crafted: `nhd.spec.case.nodeName != actual node`) → POST returns 400 `{error: "node-mismatch"}` (FR-17). **Must pass before T058.**
+- [ ] T057 [P] [US3] Author `tests/oncall_ui/integration/action_clear_skip_test.go` — analogous to T056 but for clear-skip-deletion: present annotation → POST 200, annotation removed, audit entry; absent annotation → POST 200 `{result: "already cleared (no change)"}`, no audit entry; reclaimed-node → 200 `{result: "node no longer exists (already reclaimed)"}` + audit entry with `result: "reclaimed"`. **Must pass before T058.**
+- [ ] T058 [P] [US3] Author `tests/oncall_ui/integration/action_audit_log_test.go` — captures stdout via a custom `io.Writer` injected into the structured logger, drives one uncordon and one clear-skip-deletion through the integration server, asserts: each action emits exactly one `{event: "ui_action", ...}` JSON line with `ts`, `action`, `nhd_name`, `node`, `actor: "demo-anonymous"`, `result`, `duration_ms` per FR-18. Idempotent paths emit the log line too (the action was attempted, even if the state was already correct) — but do NOT append to the audit annotation.
+
+### Implementation for User Story 3
+
+- [ ] T059 [US3] Author `internal/oncall/audit/annotation.go` per data-model.md §3 + research R-6: `UIActionEntry` Go struct (with JSON tags matching `contracts/ui-action-history.schema.json`); `appendEntry(currentAnnotation string, entry UIActionEntry) (string, error)` — pure function, decodes existing array, appends, slices to last 20 if over, re-encodes. Caller (the action handlers) is responsible for the `client.Patch` shape — annotation.go just gives back the new string value. Plus `readEntries(annotation string) ([]UIActionEntry, error)` for US5's render path.
+- [ ] T060 [P] [US3] Author `internal/oncall/audit/log.go` per FR-18: `LogUIAction(ctx, action, nhdName, node, result string, durationMs int64)` emits one structured-log line via the shared logger (T012). Caller passes `actor` implicitly — bound to the literal `"demo-anonymous"` for v1 (data-model.md §3 + spec §0 Q6). The `event: "ui_action"` field is the grep filter for AC-13.
+- [ ] T061 [US3] Author `internal/oncall/handlers/uncordon.go` per FR-14, FR-17, FR-17a: `POST /api/cases/{nhd}/actions/uncordon` — Get NHD (404 → 404 response), Get Node (NotFound → reclaimed branch), `validateNodeMatchesCase` (mismatch → 400), check `node.spec.unschedulable` (already false → idempotent branch, return 200 with no audit write but emit the FR-18 log line), patch `node.spec.unschedulable=false`, append audit entry via `audit.appendEntry`, JSON merge-patch the NHD annotation, emit FR-18 log line, return 200 `{result: "ok"}`. Reclaimed branch: skip the patch, write a single audit entry with `result: "reclaimed"`, log, return 200.
+- [ ] T062 [US3] Author `internal/oncall/handlers/clear_skip.go` per FR-15, FR-17, FR-17a: analogous shape to T061 but operating on `node.metadata.annotations["machine-lifecycle.newrelic.com/skipDeletion"]`. Already-absent → idempotent branch. Otherwise: JSON merge-patch the node to remove the annotation key (Kubernetes patch shape: `{"metadata":{"annotations":{"machine-lifecycle.newrelic.com/skipDeletion":null}}}`).
+- [ ] T063 [US3] Update `internal/oncall/render/static/detail.js` (extend T042's surface): action button click handlers — open confirmation modal (modal scaffolding in `internal/oncall/render/static/modals.js`, new file in this task), modal shows the equivalent kubectl command + current node state, "Confirm" button POSTs to `/api/cases/{nhd}/actions/{verb}` and on response: 200 → reload the page (so `composeDetailPageData` re-runs server-side, button enablement updates, action history grows), 400/404/500 → display the error inline. `modals.js` is shared scaffolding for uncordon, clear-skip-deletion, and (in US4) drain.
+
+### Build + push + deploy (US3 cf1z gate)
+
+- [ ] T064 [US3] `go test ./cmd/nodemedic-oncall-ui/... ./internal/oncall/... ./tests/oncall_ui/...` (all green including the new audit ringbuffer + uncordon + clear-skip + log tests). `make nodemedic-oncall-ui-docker-build TAG=dev-cf1z-$SHA` + `make nodemedic-oncall-ui-docker-push TAG=dev-cf1z-$SHA`.
+- [ ] T065 [US3] `helm --kube-context=cf1z upgrade nodemedic-oncall-ui ./deployment/helm/nodemedic-oncall-ui -n cf-monitoring -f deployment/helm/nodemedic-oncall-ui/values-azure.yaml --set clusterName=cf1z --set image.tag=dev-cf1z-$SHA --wait`. Restart port-forward.
+
+### US3 cf1z E2E gate — quickstart Scenarios E, F, G, I (partial), L, M, N, O, P (partial)
+
+- [ ] T066 [US3] **AC-5 gate** — quickstart Scenario E: from the per-case page in Scenario D, click "Uncordon Node" → confirmation modal → confirm. Verify `kubectl --context=cf1z get node <node> -o jsonpath='{.spec.unschedulable}'` returns empty (false). Action history shows 2 rows (Cordon controller + Uncordon UI). Uncordon button now disabled with tooltip "Already uncordoned". Audit annotation has one new entry per `kubectl --context=cf1z -n cf-monitoring get nhd <nhd-name> -o jsonpath='{.metadata.annotations.nodemedic\.cf\.newrelic\.com/ui-action-history}' | jq`.
+- [ ] T067 [US3] [P] **AC-6 gate** — quickstart Scenario F: with the button now disabled, hand-craft `curl -s -X POST localhost:8080/api/cases/<nhd-name>/actions/uncordon | jq`. Response is `{result: "already uncordoned (no change)"}`. Audit annotation length is unchanged (still 1).
+- [ ] T068 [US3] [P] **AC-7 gate** — quickstart Scenario G: click "Clear MLC skipDeletion" → confirm. Verify the annotation is removed via `kubectl --context=cf1z get node <node> -o jsonpath='{.metadata.annotations.machine-lifecycle\.newrelic\.com/skipDeletion}'` returns empty. Wait ~30 s and verify MLC reclaims the VM (`kubectl get node <node>` returns NotFound). Audit annotation now has 2 entries.
+- [ ] T069 [US3] [P] **AC-9 gate (partial — US3 actions only)** — quickstart Scenario I (US3 half): after T066 + T068 on the same NHD, the audit annotation contains exactly 2 entries: `uncordon` then `clear-skip-deletion`, in `ts` order. The combined-history surfacing (US5) ships in T079; this gate only confirms the annotation payload matches `contracts/ui-action-history.schema.json`.
+- [ ] T070 [US3] [P] **AC-13 gate** — quickstart Scenario L: `kubectl --context=cf1z -n cf-monitoring logs deployment/nodemedic-oncall-ui --since=10m | jq 'select(.event == "ui_action")'`. Verify at least 2 lines (uncordon + clear-skip-deletion), each carrying `ts`, `action`, `nhd_name`, `node`, `actor: "demo-anonymous"`, `result`, `duration_ms`.
+- [ ] T071 [US3] [P] **AC-14a full gate** — quickstart Scenario M (full): trigger a chaos run, capture the per-case page during `phase=Diagnosing`. Verify "Diagnosis in progress" banner. Click "Uncordon Node" — button is enabled (FR-9a says node state, not phase, gates enablement). Modal opens. Confirm. Action lands successfully even though `phase != Acted`. Then the post-action page render shows Uncordon disabled with tooltip "Already uncordoned" — even though `phase` didn't change.
+- [ ] T072 [US3] [P] **AC-14b gate (ring buffer cap)** — quickstart Scenario N: `for i in $(seq 1 25); do kubectl --context=cf1z cordon <node>; curl -s -X POST localhost:8080/api/cases/<nhd-name>/actions/uncordon; done`. Then `kubectl --context=cf1z -n cf-monitoring get nhd <nhd-name> -o jsonpath='{.metadata.annotations.nodemedic\.cf\.newrelic\.com/ui-action-history}' | jq 'length'` returns 20. `… | wc -c` returns < 8192. Confirms the FIFO eviction worked and the annotation stays under apiserver limits. Plus extend `.github/workflows/nodemedic-oncall-ui-ci.yml`'s `rbac-guard` job per research R-12: three negated `grep` lines — UI chart MUST NOT carry `nodes/(delete|create)|secrets|configmaps|/finalizers|\*`; controller chart MUST NOT carry `pods/eviction`; agent chart MUST NOT carry `nodes/patch`. CI fails the job on any drift. (This task ships the build-time half of Articles I.1 + I.2 enforcement; AC-12 is the runtime half.)
+- [ ] T073 [US3] [P] **AC-14c gate (reclaimed node)** — quickstart Scenario O: after T068, the node was reclaimed by MLC. The NHD persists. Click "Uncordon" on the per-case page (or `curl -X POST … /actions/uncordon`). Response is HTTP 200 `{result: "node no longer exists (already reclaimed)"}`. Per-case page reload renders "Node was reclaimed by MLC" banner with all three action buttons disabled. Audit annotation has one new entry with `result: "reclaimed"`.
+
+**Checkpoint (US3 done — Day 1 PM equivalent for this scope)**: AC-5, AC-6, AC-7, AC-9 (partial), AC-13, AC-14a, AC-14b, AC-14c green on cf1z. **The demo's headline action loop ("click → uncordon → MLC reclaim") is reproducible end-to-end.** AC-14 demo finale composite passes for the no-drain path. **STOP and DEMO if "click-uncordon-reclaim" is the demo target.** US4 (drain) and US5 (combined-history surfacing) are stretch increments on top of this.
+
+---
+
+## Phase 6: User Story 4 — Drain action (Priority: P2)
+
+**Goal**: Wire `POST /api/cases/{nhd}/actions/drain` as an SSE-streamed eviction loop. Pre-flight pod list filters DaemonSets, mirror pods, and `priority=system-node-critical` (research R-3). Concurrency cap 3 (semaphore). Each per-pod outcome is an SSE event; terminal `event: complete` carries the summary. PDB violations surface per-pod (`result=error`) and don't abort the loop. Process-local `sync.Map[nodeName] *DrainProgress` coalesces concurrent drain POSTs to the same node — second click returns 409 with the live progress (FR-9 G9).
+
+**Independent test (E2E gate at end of phase)**: quickstart Scenario H (AC-8) on cf1z.
+
+### Tests for User Story 4 (write FIRST)
+
+- [ ] T074 [P] [US4] Author `tests/oncall_ui/unit/drain_filter_test.go` — table-driven `podShouldEvict(pod) (bool, reason string)`: regular pod → (true, ""); DaemonSet pod (owner ref) → (false, "DaemonSet"); mirror pod (annotation `kubernetes.io/config.mirror`) → (false, "mirror"); `priority=system-node-critical` → (false, "system-node-critical"); terminating pod (`deletionTimestamp != nil`) → (false, "terminating"). **Must pass before T077.**
+- [ ] T075 [P] [US4] Author `tests/oncall_ui/unit/drain_progress_test.go` — `sync.Map[nodeName] *DrainProgress` lifecycle: fresh node → `LoadOrStore` returns new entry; concurrent second POST while running → `Load` returns existing `state == "running"`; counter updates under mutex are race-free (run with `-race`); state transitions to `complete` after goroutine exit; janitor drops the entry after the 5-minute window. **Must pass before T077.**
+- [ ] T076 [P] [US4] Author `tests/oncall_ui/integration/action_drain_sse_test.go` — `httptest.NewServer` + a hand-rolled `http.Flusher` capture; assert the on-the-wire frames match `contracts/oncall-ui-api.yaml` `DrainSSEStream` shape: per-pod events default `event: message` with `data: {...}\n\n`; terminator is `event: complete\ndata: {summary}\n\n`. Covers: 0-eligible-pods node → terminal `complete` event with all zeros; 5-eligible-pods node → 5 per-pod events + 1 terminal; PDB-violating pod → `result: "error"` with detail naming the PDB, loop continues; concurrent second POST during running drain → 409 with progress payload; SSE consumer disconnects mid-stream → loop continues server-side, audit annotation written on completion.
+- [ ] T076a [P] [US4] Author `tests/oncall_ui/unit/sse_parser_shape_test.go` — Go-side reference implementation of the JS `parseSSEFrame` algorithm in `internal/oncall/render/static/detail.js`. The Go reference and the JS function MUST mirror each other byte-for-byte (chunk-buffer + `\n\n` split + `event:`/`data:` line dispatch); a doc-comment block at the top of `parseSSEFrame` in `detail.js` cross-references this test so a future edit on either side surfaces drift in PR review. Table cases: well-formed single frame (default `message`); well-formed `event: complete` named frame; UTF-8 multi-byte split across two chunks (parser must buffer until the next `\n\n`); chunk boundary in the middle of `event:` / `data:` line (buffering across chunk boundary); empty `data:` line (valid SSE); two frames in one chunk; trailing partial frame at EOF (returned as residual buffer, not dispatched). Trade-off explicitly documented in the test header: this catches algorithm bugs, not JS-syntax bugs — JS-syntax regressions surface in T083's E2E gate (full Phase-6 cf1z drain run). Spec §0 binds "no `node_modules`", which precludes a Node-based JS test runner; this Go shape test is the lower-cost compromise. **Must pass before T080.**
+
+### Implementation for User Story 4
+
+- [ ] T077 [P] [US4] Author `internal/oncall/drain/plan.go` per research R-3: `podShouldEvict(pod *corev1.Pod) (bool, reason string)` is pure. Plus `listEligiblePods(ctx, c, nodeName) ([]*corev1.Pod, []SkipReason, error)` — calls `c.List(ctx, &podList, &client.ListOptions{FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName)})` (apiserver-side field selector, no client-side cache or indexer per FR-24), filters via `podShouldEvict`, returns the eligible slice and a parallel skip-reason slice for the SSE event stream.
+- [ ] T078 [US4] Author `internal/oncall/drain/progress.go` per data-model.md §7: `DrainProgress` struct with `mu sync.Mutex`, `State`, `StartedAt`, `TotalPods`, `EvictedPods`, `SkippedPods`, `ErroredPods`, `CompletedAt`. `DrainTracker` wraps `sync.Map`. Methods: `TryStart(nodeName, totalPods) (*DrainProgress, bool)` returns existing-running on conflict; `(*DrainProgress).IncEvicted/IncSkipped/IncErrored` are mutex-guarded; janitor goroutine on the `DrainTracker` drops `complete` entries after 5 minutes.
+- [ ] T079 [US4] Author `internal/oncall/drain/execute.go` + `internal/oncall/handlers/drain.go` per FR-16, research R-3, R-7. Handler: Get NHD (404), Get Node (NotFound → reclaimed branch + summary audit entry + 200 SSE with empty stream + complete), `validateNodeMatchesCase` (mismatch → 400 before any SSE bytes), `DrainTracker.TryStart` (conflict → 409 with progress JSON), set SSE response headers (`Content-Type: text/event-stream`, `Cache-Control: no-cache`, `Connection: keep-alive`, `X-Accel-Buffering: no`), kick off the eviction goroutine. Eviction loop: `sem := make(chan struct{}, 3)`; for each eligible pod, acquire sem, evict via `c.SubResource("eviction").Create(ctx, pod, &policyv1.Eviction{...})`, write SSE event on the result, release sem; for each skipped pod, write `result: "skipped"` event with the reason; on loop end, write the terminal `event: complete` event, write the audit annotation with the per-pod summary, release the `DrainTracker` entry to its 5-minute decay state. PDB violations (apiserver returns 429): write `result: "error"`, detail = error text, continue. Use `w.(http.Flusher).Flush()` after each event write.
+- [ ] T080 [US4] Update `internal/oncall/render/static/detail.js`: drain button click handler opens a confirmation modal that lists the eligible pods (fetched via a separate `GET /api/cases/{nhd}/drain-preview` — defer this endpoint or compute the list inline in `composeDetailPageData` from a one-shot pod list at page-render time; pick the inline-render path to avoid a second endpoint), confirm starts a `new EventSource('/api/cases/{nhd}/actions/drain')` (note: `EventSource` is GET-only by default; switch to a `fetch()` POST that opens a streaming reader, then reuse the same SSE parsing — research R-7 acknowledges the SSE-over-POST pattern). Per-pod events update a live progress list; `event: complete` closes the connection and reloads the page (so the new audit entry surfaces).
+
+### Build + push + deploy (US4 cf1z gate)
+
+- [ ] T081 [US4] `go test ./cmd/nodemedic-oncall-ui/... ./internal/oncall/... ./tests/oncall_ui/...` (all green including new drain tests). `make nodemedic-oncall-ui-docker-build TAG=dev-cf1z-$SHA` + push.
+- [ ] T082 [US4] `helm --kube-context=cf1z upgrade nodemedic-oncall-ui … --set image.tag=dev-cf1z-$SHA --wait`.
+
+### US4 cf1z E2E gate — quickstart Scenario H
+
+- [ ] T083 [US4] **AC-8 gate** — quickstart Scenario H: pick a canary node with at least 2 non-DaemonSet pods (optionally schedule a `nginx` Deployment with `replicas: 3` and a tight PDB on cf1z first). Open the NHD's per-case page. Click "Drain Node" → confirmation modal lists the eligible pods. Confirm. SSE stream renders per-pod outcomes inline. PDB-violating pod returns `result: "error"` with detail like "would violate PDB foo-pdb"; loop continues with the next pod. Terminal summary `evicted=N skipped=M errored=K`. Audit annotation has one new entry with `action: "drain"`, `result: "ok"` or `"partial"` (if any errors), `detail: "evicted=N skipped=M errored=K"`. Concurrent second click during the loop returns 409 with live progress.
+
+**Checkpoint (US4 done)**: AC-8 green on cf1z. The drain stretch action is reproducible. The demo narrative now extends from "uncordon + reclaim" to "drain a genuinely sick node" — but drain is P2 specifically because the demo's headline lives in US3.
+
+---
+
+## Phase 7: User Story 5 — Combined action history surfacing (Priority: P2)
+
+**Goal**: Extend `composeDetailPageData` (T040) to merge the controller's `status.action` row with the UI's `ui-action-history` annotation entries. Sort by `ts` ascending so the controller's `Cordon` always appears first, with UI follow-ups below it. Distinct actor labels per data-model.md §4.composition-rules.
+
+**Independent test (E2E gate at end of phase)**: quickstart Scenario I full (AC-10) on cf1z — three rows in timestamp order on the per-case page after a cordon + uncordon + clear-skip-deletion sequence (or four rows if drain ran too).
+
+### Tests for User Story 5
+
+- [ ] T084 [P] [US5] Extend `tests/oncall_ui/unit/data_compose_test.go` (T037) with US5-specific fixtures: NHD with controller `status.action.decision=Applied` + 0 UI entries → 1 row (Cordon controller); NHD with `status.action` + 2 UI entries (uncordon, drain) → 3 rows in `ts` ascending order; NHD with no `status.action` (pre-controller-action) + 1 UI entry → 1 row. **Must pass before T086.**
+- [ ] T085 [P] [US5] Author `tests/oncall_ui/integration/action_history_render_test.go` — drives a per-case GET against a fixture with multi-actor history; asserts the rendered HTML's `_action_history.html.tmpl` partial output contains the rows in the expected order with the expected actor strings (`controller` and `UI: demo-anonymous`).
+
+### Implementation for User Story 5
+
+- [ ] T086 [US5] Update `internal/oncall/render/data.go` (extend T040's `composeDetailPageData`): merge `status.action` (if `decision != ""`) into a controller-actor `ActionHistoryRow`; decode the `ui-action-history` annotation via `audit.readEntries` (T059) and map each `UIActionEntry` to an `ActionHistoryRow` per data-model.md §4.composition-rules; sort by `Ts` ascending. Update `internal/oncall/render/templates/_action_history.html.tmpl` to render the merged shape (caller already passes the slice).
+
+### Build + push + deploy (US5 cf1z gate)
+
+- [ ] T087 [US5] `go test ./...` (all green) + `make nodemedic-oncall-ui-docker-build TAG=dev-cf1z-$SHA` + push.
+- [ ] T088 [US5] `helm --kube-context=cf1z upgrade nodemedic-oncall-ui … --set image.tag=dev-cf1z-$SHA --wait`.
+
+### US5 cf1z E2E gate — quickstart Scenario I full + AC-14 demo finale
+
+- [ ] T089 [US5] **AC-10 gate** — quickstart Scenario I (US5 surfacing): after T066 + T068 (uncordon + clear-skip-deletion on the same NHD), the per-case page's "Action history" section shows three rows in timestamp ascending order: `Cordon (controller, T+0:00)`, `Uncordon (UI: demo-anonymous, T+~0:30)`, `ClearSkipDeletion (UI: demo-anonymous, T+~0:35)`. Each row's actor + verb + result is correctly labeled. (If T083's drain ran on the same NHD, a fourth `Drain (UI: demo-anonymous, ...)` row appears.)
+- [ ] T090 [US5] **AC-14 demo finale full walkthrough** — quickstart Scenario P: time the end-to-end demo path from chaos trigger to action complete. Trigger `chaos-kubelet-unhealthy` (or `chaos-containerd-unhealthy`); ~30 s later Slack lands; engineer clicks View; per-case page renders; engineer clicks Uncordon → confirm; page refreshes with the new audit row visible; engineer clicks Clear MLC skipDeletion → confirm; ~30 s later MLC reclaims the node. Total wall-clock from Slack arrival to action complete ≤ 60 s. Every screen renders without errors. The audit annotation shows the controller's cordon + the engineer's two UI actions in order on the per-case page.
+
+**Checkpoint (US5 done — full feature complete)**: AC-10, AC-14 green on cf1z. The audit story is closed: every action appears in one place, attributable to controller or UI, sorted in time. The demo finale walks end-to-end.
+
+---
+
+## Phase 8: Polish & Cross-Cutting Concerns
+
+**Purpose**: CI invariants follow-up, image-size verification, README, captain review, demo capture.
+
+- [ ] T091 [P] Verify image size with `docker image ls cf-registry.nr-ops.net/container-fabric/nodemedic-oncall-ui:dev-cf1z-$SHA --format '{{.Size}}'` ≤ 30 MB per research R-8. If over: profile via `docker history`, target template/static asset bloat or accidental inclusion of `vendor/` in the build context.
+- [ ] T092 [P] Author `deployment/helm/nodemedic-oncall-ui/README.md` — values reference, install/upgrade/uninstall commands for cf1z, RBAC review checklist (the four rules from R-9 + the AC-12 `auth can-i` checks), demo runbook (port-forward + Slack channel verification + 60 s walkthrough script).
+- [ ] T093 Captain review pass: have a captain outside Scope 4 walk the rendered Helm chart (`helm template … --set clusterName=cf1z`) confirming the four-rule ClusterRole, the chart's cluster-name guard, and the controller chart's new `config.useBlockKit` + `config.uiBaseURL` values. Constitution Article I.1 + I.2 are verified by chart review per the plan's Constitution-Check table.
+- [ ] T094 Run all CI workflows on a fresh PR: `nodemedic-oncall-ui-ci.yml`'s test/helm-lint/rbac-guard jobs all green. Existing `nodemedic-ci.yml` (controller) and `nodemedic-agent-ci.yml` (agent) and NPD CI unaffected (path-filter verification via touching UI paths only).
+- [ ] T095 Run the full quickstart.md A→P on cf1z one more time end-to-end. Capture the structured stdout logs from the live demo, save to `docs/cf/demos/nodemedic-oncall-ui-day1.json` for the demo deck.
+
+**Checkpoint**: All ACs (AC-1 through AC-14, AC-14a/b/c) green on cf1z. CI invariants enforced. README + demo log captured. Demo rehearsal can run the full quickstart back-to-back.
+
+---
+
+## Dependencies & Execution Order
+
+### Phase Dependencies
+
+- **Phase 1 (Setup, T001–T006)**: No dependencies — can start immediately on `hackathon-2026/cf1z-baseline`.
+- **Phase 2 (Foundational, T010–T023)**: Depends on Phase 1 completion. **Blocks all user stories.** T023 (cf1z gate) is the hard go/no-go for Phase 3.
+- **Phase 3 (US1, T024–T035)**: Depends on Phase 1 only (US1 is a controller-side change — it does NOT depend on the UI server scaffold from Phase 2). For sequencing simplicity (and to keep one cf1z deployment cycle per phase), this tasks.md still lands US1 after Phase 2; a captain who wants to ship US1 in parallel with Phase 2 can cut a dedicated branch.
+- **Phase 4 (US2, T036–T052)**: Depends on Phase 2 (server scaffold + RBAC chart). Independent of Phase 3 (US1 lives in the controller chart; US2 lives in the UI chart).
+- **Phase 5 (US3, T053–T073)**: Depends on Phase 4 (per-case page must render before action buttons can POST).
+- **Phase 6 (US4, T074–T083)**: Depends on Phase 5 (drain reuses the helpers + audit + log surfaces from US3). Could parallelize with US5 if US3 captain has bandwidth.
+- **Phase 7 (US5, T084–T090)**: Depends on Phase 5 (US5 surfaces the audit history US3 writes). Independent of Phase 6.
+- **Phase 8 (Polish, T091–T095)**: Depends on all desired user stories.
+
+### User Story Dependencies
+
+- **US1 (P1, demo entry point)**: Slack format change in the controller binary. Does not depend on the UI shell — the button URL points at a UI that may not yet exist. Verifiable independently from US2.
+- **US2 (P1, UI shell)**: Foundational only. Standalone deployable surface. No actions yet (POST handlers return 501).
+- **US3 (P1, headline action)**: Foundational + US2 (action buttons are part of the per-case page; modal scaffolding shares with US4).
+- **US4 (P2, drain)**: Foundational + US2 + (US3 helpers — `validateNodeMatchesCase`, `nodeReclaimed`, `audit.appendEntry`, `audit.LogUIAction`).
+- **US5 (P2, history surfacing)**: Foundational + US3 (US5 surfaces what US3 writes; without US3 there's no UI annotation to merge).
+
+### Within Each User Story
+
+- Tests written first; expected to FAIL at first run, then PASS after implementation. Per user instruction, every implementation task is followed by an E2E gate at the user-story boundary on cf1z.
+- Pure functions before side-effecting ones (`composeListPageRow` before `handlers/list.go`; `audit.appendEntry` before `handlers/uncordon.go`; `drain.podShouldEvict` before `drain/execute.go`).
+- Helm chart pieces lift before the Deployment template references them.
+- Wire `cmd/nodemedic-oncall-ui/main.go` last in Phase 2 (T010).
+
+### Parallel Opportunities
+
+- **Phase 1 setup**: T003 (Dockerfile), T004 (Makefile), T005 (CI workflow), T006 (controller chart values) all run in parallel after T002 lands.
+- **Phase 2 foundational**: T011 (cluster-name guard) + T012 (server scaffold) + T013 (kube client — direct, no informer per FR-24) all parallel after T010's signatures stabilize. T015 + T016 (unit tests) parallel after T011/T012. T017 (Chart.yaml/values) + T019 (RBAC) + T020 (Deployment/Service) + T021 (per-cloud values) parallel after T018 (helpers.tpl).
+- **Phase 3 US1 tests**: T024 (golden bodies) + T025 (builder tests) + T026 (URL test) — three different files, fully parallel.
+- **Phase 4 US2 tests**: T036 (fixtures) + T037 (data-compose tests) + T038 (list handler tests) + T039 (detail handler tests) — four different files, parallel.
+- **Phase 5 US3 tests**: T054 (audit ringbuffer) + T055 (handlers validate) + T056 (uncordon integration) + T057 (clear-skip integration) + T058 (audit-log integration) — five different files, parallel.
+- **Phase 5 US3 cf1z gates**: T066 → T067/T068 sequentially (T068 needs T066 + T067 done on the same NHD), then T069/T070/T071/T072/T073 parallel.
+- **Phases 6 + 7**: US4 and US5 can run in parallel after Phase 5 lands (different files, independent ACs). Two captains, two branches.
+- **Phase 8 polish**: T091, T092, T094 are independent files; T093 + T095 are review/manual.
+
+---
+
+## Parallel Example: User Story 2 implementation
+
+```text
+# Day 2 morning, after Foundational lands and US2 tests are written and red:
+
+# Developer A — pure / library code:
+T040 internal/oncall/render/data.go (composeListPageRow + composeDetailPageData)
+
+# Developer B — server-side rendering surface:
+T041 internal/oncall/render/templates/{layout,list,detail,_action_history}.html.tmpl
+T042 internal/oncall/render/static/{styles.css,list.js}
+
+# Both converge on:
+T043 internal/oncall/handlers/list.go
+T044 internal/oncall/handlers/detail.go
+
+# Then sequential build/deploy:
+T045 build image (Colima)
+T046 push image to cf-registry
+T047 helm install on cf1z
+
+# Then parallel cf1z gates:
+T048 AC-3 gate    T049 AC-4 gate    T050 AC-14a dry-run    T051 AC-11    T052 AC-12
+
+# Final convergence: US2 checkpoint, hand off to US3 captain.
+```
+
+---
+
+## Implementation Strategy
+
+### MVP First (US1 + US2 → Day 1 PM checkpoint — Slack message + clickable UI)
+
+1. **Phase 1 (Setup)** — Dockerfile + Makefile + CI + chart-skeleton scaffolding. Time-box to 2 h.
+2. **Phase 2 (Foundational)** — server scaffold, kube client, RBAC chart, cluster-name guard, dry-run cf1z gate. Time-box to 3 h.
+3. **Phase 3 (US1 — Slack Block Kit format)** — three new builders + controller flag + Helm value flip + cf1z deploy + AC-1/AC-2 gates. Time-box to 3 h.
+4. **STOP and DEMO** if "polished Slack message" alone is the early demo target. Click-through 404s; that's expected.
+5. **Phase 4 (US2 — UI shell)** — list + detail pages, no actions yet. Cf1z deploy + AC-3/AC-4/AC-11/AC-12/AC-14a (dry-run) gates. Time-box to a full Day 1 PM.
+6. **STOP and DEMO** if "Slack message → click → read diagnosis" is the demo target.
+
+### Incremental Delivery → Day 2 (the headline action loop)
+
+7. **Phase 5 (US3 — Uncordon + Clear-skipDeletion)** — the demo's headline action. Audit ring buffer + structured log + idempotent paths + reclaimed-node path + defensive belt + confirmation modals. AC-5/6/7/9-partial/13/14a/14b/14c green. **STOP and DEMO if "click → uncordon → MLC reclaim" is the demo target.**
+
+### Day 2 Stretch + Polish
+
+8. **Phase 6 (US4 — Drain)** in parallel with **Phase 7 (US5 — Combined history)** — two captains, two branches, two independent E2E gates. Time-box to half a day total.
+9. **Phase 8 (Polish)** — image size, README, captain review, full quickstart rehearsal, demo log capture. Time-box to half a day.
+
+### Constitution checkpoints (one-line cross-references)
+
+- **Article I.1 credential-layer least privilege** — T019 (UI ClusterRole rules), T022 (chart render test), T072 (CI rbac-guard job), T093 (captain chart review).
+- **Article I.2 cordon-only stays a controller property** — T019 (UI ClusterRole adds `nodes/patch` + `pods/eviction` for the deliberate scope expansion), T072 (CI grep guard asserts the controller chart still has no `pods/eviction` and the agent chart still has no `nodes/patch`).
+- **Article I.4 every action observable** — T060 (structured stdout log), T059 (audit annotation), T072 (CI grep guard).
+- **Article I.5 non-production clusters only** — T011 (binary guard), T018 (Helm helper guard), T022 (chart render test).
+- **Article II.1 two cross-scope contracts only** — T024+T025 (Block Kit goldens match contracts/), T059 (audit annotation matches schema), T043+T044 (UI HTTP surface matches OpenAPI). Zero new cross-scope contracts; one new annotation key on an existing CR is a payload-only change.
+- **Article III.4 demo-flow priorities** — phase order is US1 → US2 → US3 → US4 → US5 (P1 demo path lands before P2 stretch).
+
+---
+
+## Notes
+
+- [P] tasks = different files, no dependencies on incomplete tasks.
+- [Story] tag traces every implementation task back to a user story and an AC in spec §8.
+- Per user instruction: **every task carries unit tests adjacent to (or before) the implementation, and every user story closes with cf1z E2E gates against real components before the next phase begins.** Don't batch tests across phases.
+- Verify tests fail before implementing (TDD spirit; the spec has hard-fact expectations on FR-1 / FR-9a / FR-14 / FR-15 / FR-16 / FR-17 / FR-17a / FR-18 / FR-18a).
+- Commit after each task or logical group; squash inside a PR if the chain is dense.
+- Do not begin US-tagged tasks until Phase 2 + T023 (the cf1z dry-run gate) is green.
+- **CI grep guards (research R-12) ship in T072** — the three negated greps land alongside the AC-14b ring-buffer cap test in US3 because that's the first phase whose chart RBAC + audit annotation + controller-chart-flag all need to be checked together. Earlier phases would have a partial guard; landing the full triplet in one shot is cleaner.
+- **`--use-block-kit` flag + Helm value rollback path** — flag definition in T029 (controller binary), value plumbing in T006 (controller chart), end-to-end rehearsal in T035. The default flips to `true` once US1 ships; any midnight rendering glitch is one Helm-value flip away from rolling back to plain text.
+- **`Dockerfile.nodemedic-oncall-ui` + Makefile target** — Dockerfile in T003, Make target in T004, first build in T045 (US2 — US1 doesn't ship a UI image because it's a controller-binary change only).
+- **Image build is manual** for the hackathon. CI verifies tests + lint + RBAC guards; pushing to cf-registry happens from a developer laptop with Colima + email-as-username creds (verified empirically against the controller and agent image pushes).
+- If a captain pivots away from this plan mid-hackathon, raise it (Constitution III.5) — don't silently re-architect.
