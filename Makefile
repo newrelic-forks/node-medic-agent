@@ -486,3 +486,67 @@ nodemedic-helm-package:
 .PHONY: nodemedic-clean
 nodemedic-clean:
 	rm -f $(NODEMEDIC_BIN)
+
+# ===========================================================================
+# NodeMedic AGENT (Scope 3 — AFA 2026 hackathon)
+# Spec: .specify/specs/002-nodemedic-agent/
+#
+# All targets are namespaced with `nodemedic-agent-` and operate only on:
+#   cmd/nodemedic-agent/, nodemedic_agent/, prompts/,
+#   deployment/helm/nodemedic-agent/, tests/nodemedic_agent/,
+#   Dockerfile.nodemedic-agent, pyproject.toml, uv.lock
+# NPD's existing targets and the controller's `nodemedic-*` targets are
+# unchanged.
+# ===========================================================================
+
+NODEMEDIC_AGENT_IMG ?= cf-registry.nr-ops.net/container-fabric/nodemedic-agent
+NODEMEDIC_AGENT_HELM_DIR ?= deployment/helm/nodemedic-agent
+NODEMEDIC_AGENT_TESTS_DIR ?= tests/nodemedic_agent
+
+# TAG defaults to dev-cf1z-<shortsha>; override with `make … TAG=…`.
+NODEMEDIC_AGENT_TAG ?= dev-cf1z-$(shell git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
+
+.PHONY: nodemedic-agent-help
+nodemedic-agent-help:
+	@echo "NodeMedic agent (Scope 3) make targets:"
+	@echo "  nodemedic-agent-test          uv run pytest tests/nodemedic_agent/"
+	@echo "  nodemedic-agent-lint          ruff/format if added; placeholder today"
+	@echo "  nodemedic-agent-runbook-lint  bash $(NODEMEDIC_AGENT_TESTS_DIR)/check_runbook.sh prompts/runbook.md"
+	@echo "  nodemedic-agent-helm-lint     helm lint $(NODEMEDIC_AGENT_HELM_DIR)"
+	@echo "  nodemedic-agent-docker-build  docker buildx build -f Dockerfile.nodemedic-agent (linux/amd64)"
+	@echo "  nodemedic-agent-docker-push   docker push $(NODEMEDIC_AGENT_IMG):$(NODEMEDIC_AGENT_TAG)"
+	@echo "  nodemedic-agent-clean         rm -rf .venv .pytest_cache __pycache__"
+
+.PHONY: nodemedic-agent-test
+nodemedic-agent-test:
+	uv run pytest $(NODEMEDIC_AGENT_TESTS_DIR)/ -v
+
+.PHONY: nodemedic-agent-lint
+nodemedic-agent-lint:
+	@echo "nodemedic-agent-lint: no linter wired in v1 (deferred to Phase 8 polish)"
+
+.PHONY: nodemedic-agent-runbook-lint
+nodemedic-agent-runbook-lint:
+	bash $(NODEMEDIC_AGENT_TESTS_DIR)/check_runbook.sh prompts/runbook.md
+
+.PHONY: nodemedic-agent-helm-lint
+nodemedic-agent-helm-lint:
+	helm lint $(NODEMEDIC_AGENT_HELM_DIR) --set clusterName=cf1z
+
+.PHONY: nodemedic-agent-docker-build
+nodemedic-agent-docker-build:
+	docker buildx build \
+	  -f Dockerfile.nodemedic-agent \
+	  --platform linux/amd64 \
+	  -t $(NODEMEDIC_AGENT_IMG):$(NODEMEDIC_AGENT_TAG) \
+	  --load \
+	  .
+
+.PHONY: nodemedic-agent-docker-push
+nodemedic-agent-docker-push:
+	docker push $(NODEMEDIC_AGENT_IMG):$(NODEMEDIC_AGENT_TAG)
+
+.PHONY: nodemedic-agent-clean
+nodemedic-agent-clean:
+	rm -rf .venv .pytest_cache .ruff_cache .mypy_cache
+	find nodemedic_agent tests/nodemedic_agent -type d -name __pycache__ -prune -exec rm -rf {} +

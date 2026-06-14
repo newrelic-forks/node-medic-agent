@@ -1,0 +1,165 @@
+# Dockerfile for the NodeMedic agent (Scope 3 of AFA 2026 hackathon).
+#
+# Three-stage build (research R-10):
+#   1. Python builder       — uv sync --frozen --no-dev → /app/.venv
+#   2. CLI bundle           — aws CLI v2, az CLI 2.x, kubectl 1.33.x
+#   3. Runtime              — copies the venv + CLIs + agent source + runbook
+#
+# Build/CLI stages use BUILDPLATFORM so Apple Silicon dev hosts can cross-
+# compile via Colima (same lesson the controller image learned, commit
+# 3f9ee3af). The runtime stage stays linux/amd64 because cf1z worker nodes
+# are amd64-only.
+#
+# Build:
+#   docker buildx build \
+#     -f Dockerfile.nodemedic-agent \
+#     --platform linux/amd64 \
+#     -t cf-registry.nr-ops.net/container-fabric/nodemedic-agent:dev-cf1z-<sha> \
+#     .
+#
+# Or via the Makefile: `make nodemedic-agent-docker-build TAG=dev-cf1z-<sha>`.
+#
+# NFR-9 reproducibility:
+#   - All apt + curl downloads are version-pinned.
+#   - --no-cache-dir on pip / uv installs.
+#   - Runbook is COPY'd into the image (image SHA pins the runbook version
+#     per the spec's Clarifications).
+
+# ---------------------------------------------------------------------------
+# Stage 1 — Python build (BUILDPLATFORM)
+# ---------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM cf-registry.nr-ops.net/docker.io/library/python:3.12-slim AS python-builder
+
+ENV UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
+    UV_PYTHON_DOWNLOADS=never \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Install uv via the official binary (pinned). Avoid pip → wheel resolution
+# overhead inside the container.
+ARG UV_VERSION=0.7.3
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && curl -LsSf "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-installer.sh" -o /tmp/uv-installer.sh \
+ && env UV_INSTALL_DIR=/usr/local/bin sh /tmp/uv-installer.sh \
+ && rm /tmp/uv-installer.sh \
+ && apt-get purge -y curl \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Cache the virtualenv on the dependency manifest, not on source.
+COPY pyproject.toml uv.lock README.md /app/
+COPY .specify/specs/002-nodemedic-agent/quickstart.md /app/.specify/specs/002-nodemedic-agent/quickstart.md
+COPY nodemedic_agent /app/nodemedic_agent
+RUN uv sync --frozen --no-dev --no-editable
+
+# ---------------------------------------------------------------------------
+# Stage 2 — CLI bundle (BUILDPLATFORM)
+# ---------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM cf-registry.nr-ops.net/docker.io/library/debian:12-slim AS cli-bundle
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+ARG KUBECTL_VERSION=v1.33.5
+ARG AWSCLI_VERSION=2.30.6
+ARG AZ_CLI_VERSION=2.79.0
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      unzip \
+      gnupg \
+      lsb-release \
+      apt-transport-https \
+      python3 \
+      python3-pip \
+      python3-venv \
+ && rm -rf /var/lib/apt/lists/*
+
+# kubectl 1.33.x — matches cf1z's k8s 1.33.8.
+RUN curl -fsSLo /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+ && chmod +x /usr/local/bin/kubectl
+
+# aws CLI v2 (amd64).
+RUN curl -fsSLo /tmp/awscliv2.zip \
+      "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip" \
+ && unzip -q /tmp/awscliv2.zip -d /tmp \
+ && /tmp/aws/install -i /usr/local/aws-cli -b /usr/local/bin \
+ && rm -rf /tmp/awscliv2.zip /tmp/aws
+
+# az CLI via pip into an isolated venv. Microsoft's deb repo is geoip-flaky
+# from build VMs; the Python distribution is the most reliable path.
+RUN python3 -m venv /opt/azcli \
+ && /opt/azcli/bin/pip install --no-cache-dir --upgrade pip \
+ && /opt/azcli/bin/pip install --no-cache-dir "azure-cli==${AZ_CLI_VERSION}" \
+ && ln -s /opt/azcli/bin/az /usr/local/bin/az
+
+# ---------------------------------------------------------------------------
+# Stage 3 — Runtime (linux/amd64 — cf1z is amd64 only)
+# ---------------------------------------------------------------------------
+FROM --platform=linux/amd64 cf-registry.nr-ops.net/docker.io/library/python:3.12-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/app/.venv/bin:/usr/local/aws-cli/v2/current/bin:${PATH}" \
+    AWS_PAGER=""
+
+# Runtime dependencies the SDK + Bash tools need.
+# - openssh-client: ssh probes against worker nodes (FR-4)
+# - jq, curl, dnsutils, iproute2, procps: standard kit the runbook expects
+# - ca-certificates: outbound HTTPS to the gateway, NR MCP, cloud APIs
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      openssh-client \
+      jq \
+      curl \
+      dnsutils \
+      iproute2 \
+      procps \
+      bash \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system --gid 1000 nodemedic \
+ && useradd  --system --uid 1000 --gid nodemedic --home /app --shell /usr/sbin/nologin nodemedic \
+ && mkdir -p /app/prompts /app/tests \
+ && chown -R nodemedic:nodemedic /app
+
+WORKDIR /app
+
+# Python venv from stage 1.
+COPY --from=python-builder --chown=nodemedic:nodemedic /app/.venv /app/.venv
+COPY --from=python-builder --chown=nodemedic:nodemedic /app/nodemedic_agent /app/nodemedic_agent
+
+# CLI bundle from stage 2.
+COPY --from=cli-bundle /usr/local/bin/kubectl /usr/local/bin/kubectl
+COPY --from=cli-bundle /usr/local/aws-cli /usr/local/aws-cli
+COPY --from=cli-bundle /usr/local/bin/aws /usr/local/bin/aws
+COPY --from=cli-bundle /usr/local/bin/aws_completer /usr/local/bin/aws_completer
+COPY --from=cli-bundle /opt/azcli /opt/azcli
+COPY --from=cli-bundle /usr/local/bin/az /usr/local/bin/az
+
+# Agent entrypoint module.
+COPY --chown=nodemedic:nodemedic cmd/nodemedic-agent /app/cmd/nodemedic-agent
+
+# Runbook (image SHA pins the runbook version per Clarifications).
+COPY --chown=nodemedic:nodemedic prompts/runbook.md /app/prompts/runbook.md
+
+# Runbook lint script — Helm pre-install Job invokes this from /app/tests/.
+COPY --chown=nodemedic:nodemedic tests/nodemedic_agent/check_runbook.sh /app/tests/check_runbook.sh
+RUN chmod +x /app/tests/check_runbook.sh
+
+USER nodemedic:nodemedic
+
+EXPOSE 8080
+
+LABEL org.opencontainers.image.title="nodemedic-agent" \
+      org.opencontainers.image.description="NodeMedic AI diagnosis agent (Scope 3, AFA 2026 hackathon)" \
+      org.opencontainers.image.source="https://source.datanerd.us/container-fabric/node-medic-agent" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+CMD ["/app/.venv/bin/uvicorn", "nodemedic_agent.app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

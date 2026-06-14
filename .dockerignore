@@ -1,0 +1,78 @@
+# Keep the build context tight for Dockerfile.nodemedic-agent.
+# NPD's existing Dockerfile + Dockerfile.nodemedic-controller use their own
+# build stages and select their own COPY targets — this file applies to both
+# but is structured around the agent's needs (smallest image), with the Go
+# trees intentionally excluded since neither agent build needs them.
+
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# CI / spec-kit / docs
+.github
+.specify
+docs
+README.md
+CONTRIBUTING.md
+LICENSE
+SECURITY.md
+OWNERS*
+CODEOWNERS
+
+# Editors and OS metadata
+.vscode
+.idea
+.DS_Store
+*.swp
+*.iml
+
+# Python build artifacts
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+htmlcov
+.coverage
+.coverage.*
+.tox
+build
+dist
+*.whl
+
+# Go (controller / NPD) — agent image does not need these
+vendor
+bin
+.bin
+test/bin
+*.test
+*.tar.gz
+output
+coverage.out
+debug.test
+
+# Environment + secrets — never bake these into a layer
+.env
+.env.*
+*.pem
+*.key
+ci.env
+pr.env
+
+# Other Dockerfiles (avoid recursive copies)
+Dockerfile
+Dockerfile.windows
+Dockerfile.nodemedic-controller
+
+# Helm chart — not needed at build time (deploy-time artifact)
+deployment/helm
+deployment/cf1z
+
+# Test outputs
+junit*.xml
