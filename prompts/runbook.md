@@ -34,8 +34,10 @@ You have these tools:
 
 - `Bash` for `kubectl`, `ssh`, `aws`, `az`, `dmesg`, `journalctl`,
   `/proc` reads, and `iptables` queries on the worker node.
-- `mcp__nr__*` for New Relic NRQL queries, log analysis, and entity
-  lookups against staging account `1`.
+- `mcp__nodemedic__execute_nrql_query` for New Relic NRQL queries
+  against staging account `1` — call this tool directly with the NRQL
+  string and `account_id=1`. Do NOT echo the NRQL string via
+  `Bash cat <<EOF`; that doesn't run the query.
 - `mcp__nodemedic__emit_report` to finalize the case.
 - The SDK built-ins (`Read`, `Glob`, `Grep`, `WebFetch`, etc.) for
   ancillary lookups when needed. Prefer the case-specific tools above.
@@ -57,7 +59,7 @@ When `case.provider == "aws"`:
   --region <region>` — confirm the instance is running and capture its
   AMI / launch time / instance type.
 - `aws cloudwatch get-metric-statistics ...` — only when NRQL has gaps.
-  NRQL via `mcp__nr__execute_nrql_query` is preferred.
+  NRQL via `mcp__nodemedic__execute_nrql_query` is preferred.
 
 ## Azure:
 
@@ -135,7 +137,7 @@ the attempt and the credential layer will reject the read. Don't try.
 
 ## NRQL discipline
 
-Every `mcp__nr__execute_nrql_query` call MUST set `account_id=1`
+Every `mcp__nodemedic__execute_nrql_query` call MUST set `account_id=1`
 (staging). The agent's NR token is scoped to staging only — calls
 against any other account will fail with an authorization error.
 
@@ -308,7 +310,7 @@ two.
    — confirms the kubelet process is up. Pair with probe 4: process up
    AND iptables rule present → injected fault, not real kubelet sickness.
 6. **NRQL kubelet metric drop (REQUIRED for AC-3b)**: call the
-   `mcp__nr__execute_nrql_query` tool directly — DO NOT echo the query
+   `mcp__nodemedic__execute_nrql_query` tool directly — DO NOT echo the query
    via `Bash cat <<EOF` and DO NOT skip this probe even when host-side
    evidence is overwhelming. Use `account_id=1` and `nrql_query="SELECT
    count(*) FROM K8sNodeSample WHERE clusterName='<clusterName>' AND
@@ -327,7 +329,7 @@ two.
   PID AND
 - Probe 3 shows recent `SyncLoop` / `kubelet_node_status` lines (kubelet
   is doing real work — only the healthz path is blocked) AND
-- Probe 6 (the NRQL `mcp__nr__execute_nrql_query` call) returns at
+- Probe 6 (the NRQL `mcp__nodemedic__execute_nrql_query` call) returns at
   least one row of `K8sNodeSample` for the affected node within the
   last 15 minutes — confirming infra-agent telemetry is still landing.
 
@@ -362,7 +364,7 @@ below — no substitutions, no Bash-emulating the NRQL call:
 
 - one `kubectl` source (probe 1 or 2),
 - one `ssh` source (probe 3, 4, or 5; probe 4 is the slam-dunk),
-- one `nrql` source (probe 6, the actual `mcp__nr__execute_nrql_query`
+- one `nrql` source (probe 6, the actual `mcp__nodemedic__execute_nrql_query`
   tool call — not a Bash heredoc that prints the query string).
 
 Three source kinds cleanly separated → confidence 0.85+. Anything

@@ -43,7 +43,6 @@ from nodemedic_agent.logging import bind_case_id, get_logger
 from nodemedic_agent.runner.case_table import Case, CaseTable
 from nodemedic_agent.runner.hooks import ToolHookState, make_tool_log_hook
 from nodemedic_agent.runner.model_resolver import ModelResolver, ResolvedModels
-from nodemedic_agent.runner.nr_mcp import nr_mcp_config
 from nodemedic_agent.runner.prompt import build_user_prompt, load_runbook
 from nodemedic_agent.tools.emit_report import make_emit_report
 
@@ -346,9 +345,16 @@ async def _drive_sdk_loop(
 
     from nodemedic_agent.tools.emit_report import make_emit_report_server  # noqa: WPS433
 
-    # Per-case MCP server with a fresh emit_report closure (G2 / FR-3).
+    # Per-case MCP server with a fresh emit_report closure (G2 / FR-3)
+    # plus the local execute_nrql_query tool that posts to NerdGraph.
     nodemedic_server = _make_per_case_server(
-        case, writer, model_used=model_used, nhd_name=nhd_name, outcome_sink=outcome_sink
+        case,
+        writer,
+        model_used=model_used,
+        nhd_name=nhd_name,
+        outcome_sink=outcome_sink,
+        nr_api_key=settings.nr_mcp_token,
+        nr_nerdgraph_url=settings.nr_mcp_url,
     )
 
     hook_state = ToolHookState()
@@ -384,17 +390,15 @@ async def _drive_sdk_loop(
             "WebSearch",
         ],
         mcp_servers={
+            # Single in-process MCP server hosting both emit_report
+            # (terminal CR write) and execute_nrql_query (NerdGraph
+            # proxy). The HTTP MCP at mcp.newrelic.com isn't wired —
+            # see tools/nrql.py for the rationale.
             "nodemedic": nodemedic_server,
-            "nr": nr_mcp_config(settings),
         },
         allowed_tools=[
             "mcp__nodemedic__emit_report",
-            "mcp__nr__execute_nrql_query",
-            "mcp__nr__list_recent_logs",
-            "mcp__nr__analyze_entity_logs",
-            "mcp__nr__analyze_golden_metrics",
-            "mcp__nr__lookup_entity",
-            "mcp__nr__get_entity",
+            "mcp__nodemedic__execute_nrql_query",
             "Bash",
             "Read",
             "Glob",
@@ -473,23 +477,42 @@ def _make_per_case_server(
     model_used: str,
     nhd_name: str,
     outcome_sink: dict[str, Any],
+    nr_api_key: str | None = None,
+    nr_nerdgraph_url: str | None = None,
 ):
-    """Build the per-case in-process MCP server hosting `emit_report`.
+    """Build the per-case in-process MCP server hosting nodemedic tools.
 
-    Wraps `make_emit_report` + `create_sdk_mcp_server` so the runner can
-    swap implementations under test without importing from
-    `claude_agent_sdk` here directly.
+    Hosts both ``emit_report`` (terminal CR write) and
+    ``execute_nrql_query`` (local NerdGraph proxy that mirrors nova's
+    pattern — see ``tools/nrql.py``). The HTTP MCP at
+    ``mcp.newrelic.com`` rejects staging NRAKs; this local tool lets the
+    model run real NRQL against staging-api.newrelic.com using the same
+    NRAK already mounted as ``nodemedic-nr-token``.
     """
     from claude_agent_sdk import create_sdk_mcp_server
 
-    tool = make_emit_report(
-        case,
-        writer,
-        model_used=model_used,
-        nhd_name=nhd_name,
-        outcome_sink=outcome_sink,
+    from nodemedic_agent.tools.nrql import make_execute_nrql_query
+
+    tools_list = [
+        make_emit_report(
+            case,
+            writer,
+            model_used=model_used,
+            nhd_name=nhd_name,
+            outcome_sink=outcome_sink,
+        )
+    ]
+    if nr_api_key and nr_nerdgraph_url:
+        tools_list.append(
+            make_execute_nrql_query(
+                api_key=nr_api_key,
+                nerdgraph_url=nr_nerdgraph_url,
+                case_id=case.case_id,
+            )
+        )
+    return create_sdk_mcp_server(
+        name="nodemedic", version="1.1.0", tools=tools_list
     )
-    return create_sdk_mcp_server(name="nodemedic", version="1.0.0", tools=[tool])
 
 
 def _trace_message(msg: Any) -> None:

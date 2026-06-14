@@ -14,10 +14,15 @@ config:
   claudeModel: "claude-opus-4-7"
   claudeFallbackModel: "claude-sonnet-4-6"
   nrAccountId: 1
-  # NR HTTP MCP URL — set per the manifests/README.md path. Default is
-  # the public NR HTTP MCP endpoint; flip to a New Relic-internal mirror
-  # if your install needs it.
-  nrMcpUrl: "https://mcp.newrelic.com/mcp"
+  # NR HTTP MCP URL — kept for the readyz probe and for compatibility
+  # with the chart shape, but not actually used as an HTTP MCP server.
+  # The agent ships a local in-process MCP server hosting
+  # mcp__nodemedic__execute_nrql_query that calls staging-api.newrelic.com's
+  # NerdGraph directly with `Api-Key: <NRAK>` (mirrors nova's
+  # k8s-agent-claude-sdk pattern). The public mcp.newrelic.com endpoint
+  # rejects staging-scoped NRAKs anyway (verified 2026-06-14: 401
+  # "authentication required").
+  nrMcpUrl: "https://staging-api.newrelic.com/graphql"
   kubeNamespace: "cf-monitoring"
   stubAgent: false
 
