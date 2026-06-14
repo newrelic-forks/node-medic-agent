@@ -72,3 +72,55 @@ def test_readyz_503_when_no_usable_claude(settings: Settings) -> None:
     with TestClient(create_app(settings)) as client:
         r = client.get("/readyz")
     assert r.status_code == 503
+
+
+@respx.mock
+def test_readyz_200_when_mcp_returns_401(settings: Settings) -> None:
+    """MCP probe is reachability-only — 4xx (auth required) means alive."""
+    respx.get("https://gateway.example.test/v1/models").mock(
+        return_value=httpx.Response(
+            200,
+            json={"data": [{"id": "claude-opus-4-7"}, {"id": "claude-sonnet-4-6"}]},
+        )
+    )
+    respx.head("https://mcp.example.test").mock(return_value=httpx.Response(401))
+    with TestClient(create_app(settings)) as client:
+        r = client.get("/readyz")
+    assert r.status_code == 200
+
+
+@respx.mock
+def test_readyz_503_when_mcp_returns_5xx(settings: Settings) -> None:
+    """5xx from MCP means the endpoint is sick, not just authn-gated."""
+    respx.get("https://gateway.example.test/v1/models").mock(
+        return_value=httpx.Response(
+            200,
+            json={"data": [{"id": "claude-opus-4-7"}, {"id": "claude-sonnet-4-6"}]},
+        )
+    )
+    respx.head("https://mcp.example.test").mock(return_value=httpx.Response(503))
+    with TestClient(create_app(settings)) as client:
+        r = client.get("/readyz")
+    assert r.status_code == 503
+
+
+@respx.mock
+def test_readyz_200_with_nerd_completion_shape(settings: Settings) -> None:
+    """Gateway returns a bare list with `value` keys, not `{"data": [{"id": ...}]}`."""
+    respx.get("https://gateway.example.test/v1/models").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"value": "gpt-4o", "provider": "OpenAI"},
+                {"value": "claude-opus-4-7", "provider": "Anthropic"},
+                {"value": "claude-sonnet-4-6", "provider": "Anthropic"},
+            ],
+        )
+    )
+    respx.head("https://mcp.example.test").mock(return_value=httpx.Response(200))
+    with TestClient(create_app(settings)) as client:
+        r = client.get("/readyz")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["model_primary"] == "claude-opus-4-7"
+    assert payload["model_fallback"] == "claude-sonnet-4-6"

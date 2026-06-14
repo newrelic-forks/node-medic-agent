@@ -117,13 +117,23 @@ async def _fetch_catalog(client: httpx.AsyncClient, settings: Settings) -> list[
         )
         return []
     payload = response.json()
-    items = payload.get("data") if isinstance(payload, dict) else payload
+    # Two known catalog shapes:
+    #   - public Anthropic / OpenAI: {"data": [{"id": "..."}, ...]}
+    #   - NR nerd-completion gateway: [{"value": "...", "provider": "..."}, ...]
+    if isinstance(payload, dict):
+        items = payload.get("data") or payload.get("models") or []
+    else:
+        items = payload
     if not isinstance(items, list):
         return []
     ids: list[str] = []
     for item in items:
-        if isinstance(item, dict) and "id" in item:
-            ids.append(str(item["id"]))
+        if isinstance(item, dict):
+            # Prefer "id" (Anthropic/OpenAI) then "value" (nerd-completion).
+            for key in ("id", "value", "name"):
+                if item.get(key):
+                    ids.append(str(item[key]))
+                    break
         elif isinstance(item, str):
             ids.append(item)
     return ids

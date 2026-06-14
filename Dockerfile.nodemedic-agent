@@ -26,9 +26,15 @@
 #     per the spec's Clarifications).
 
 # ---------------------------------------------------------------------------
-# Stage 1 — Python build (BUILDPLATFORM)
+# Stage 1 — Python build (TARGETPLATFORM)
+#
+# IMPORTANT: must use TARGETPLATFORM (not BUILDPLATFORM) for the venv stage
+# because pydantic_core ships a native C extension (and so does cffi /
+# greenlet / etc transitively). A venv built on aarch64 CANNOT be COPY'd
+# into an amd64 runtime image — the .so files won't load. buildkit /
+# qemu emulates the runtime stage when host != target, which is fine.
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM cf-registry.nr-ops.net/docker.io/library/python:3.12-slim AS python-builder
+FROM docker.io/library/python:3.12-slim AS python-builder
 
 ENV UV_LINK_MODE=copy \
     UV_NO_CACHE=1 \
@@ -51,15 +57,14 @@ RUN apt-get update \
 WORKDIR /app
 
 # Cache the virtualenv on the dependency manifest, not on source.
-COPY pyproject.toml uv.lock README.md /app/
-COPY .specify/specs/002-nodemedic-agent/quickstart.md /app/.specify/specs/002-nodemedic-agent/quickstart.md
+COPY pyproject.toml uv.lock /app/
 COPY nodemedic_agent /app/nodemedic_agent
 RUN uv sync --frozen --no-dev --no-editable
 
 # ---------------------------------------------------------------------------
 # Stage 2 — CLI bundle (BUILDPLATFORM)
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM cf-registry.nr-ops.net/docker.io/library/debian:12-slim AS cli-bundle
+FROM --platform=$BUILDPLATFORM cf-registry.nr-ops.net/docker.io/library/debian:bookworm-slim AS cli-bundle
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -101,8 +106,11 @@ RUN python3 -m venv /opt/azcli \
 
 # ---------------------------------------------------------------------------
 # Stage 3 — Runtime (linux/amd64 — cf1z is amd64 only)
+# Build invocation MUST set --platform linux/amd64 so buildx emits a single
+# amd64 manifest. The Dockerfile leaves the FROM platform unpinned to keep
+# Hadolint happy; the Makefile / buildx pin enforces the architecture.
 # ---------------------------------------------------------------------------
-FROM --platform=linux/amd64 cf-registry.nr-ops.net/docker.io/library/python:3.12-slim AS runtime
+FROM docker.io/library/python:3.12-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

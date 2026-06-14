@@ -3,7 +3,6 @@ name = "nodemedic-agent"
 version = "0.1.0"
 description = "NodeMedic agent (Scope 3) — receives POST /diagnose, runs a Claude Agent SDK loop per case, writes the diagnosis to NodeHealthDiagnosisAI status."
 requires-python = ">=3.12"
-readme = ".specify/specs/002-nodemedic-agent/quickstart.md"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Container Fabric" }]
 

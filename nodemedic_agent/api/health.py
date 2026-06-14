@@ -47,9 +47,19 @@ async def handle_readyz(request: Request) -> Response:
         if resolved is None:
             response = _json(503, {"status": "no_usable_model"})
         else:
+            # MCP servers return non-2xx for HEAD without proper headers,
+            # but the probe is just verifying TCP+TLS reachability — any
+            # response means the endpoint is alive. Treat 401 / 405 / 4xx
+            # the same as 200 (the agent's actual MCP traffic carries its
+            # own auth via the SDK's mcp_servers config).
             try:
                 head = await client.head(settings.nr_mcp_url)
-                head.raise_for_status()
+                if head.status_code >= 500:
+                    raise httpx.HTTPStatusError(
+                        f"server returned {head.status_code}",
+                        request=head.request,
+                        response=head,
+                    )
             except Exception as exc:  # noqa: BLE001
                 log.warning("readyz_mcp_probe_failed", error=str(exc)[:256])
                 response = _json(

@@ -351,17 +351,23 @@ class NHDWriter:
 
         condition_status: Literal["True", "False"]
         condition_reason: str
+        condition_message: str
         if final_phase == "Diagnosed":
             condition_status = "True"
             condition_reason = "EvidenceValid"
+            condition_message = "diagnosis written by agent"
         else:
             condition_status = "False"
             condition_reason = failure_reason or "ToolError"
+            condition_message = (
+                f"agent terminated with reason={failure_reason or 'ToolError'}"
+            )
 
         ready_condition = {
             "type": "ReportReady",
             "status": condition_status,
             "reason": condition_reason,
+            "message": condition_message,
             "lastTransitionTime": _now_rfc3339(),
         }
         # Replace any prior ReportReady; keep other condition types intact.
