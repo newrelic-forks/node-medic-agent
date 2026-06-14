@@ -357,9 +357,32 @@ async def _drive_sdk_loop(
 
     runbook = load_runbook(settings.runbook_path)
 
+    # Capture CLI stderr so we can debug from kubectl logs when the loop
+    # halts without firing tool calls (saw this on cf1z first run — the
+    # model would say "ok" without invoking emit_report). The callback
+    # pipes each line through the structured logger so it joins the
+    # case_id stream.
+    def _stderr_logger(line: str) -> None:
+        line = line.rstrip()
+        if not line:
+            return
+        log.info("sdk_stderr", line=line[:1024])
+
     options = ClaudeAgentOptions(
         system_prompt=runbook,
         permission_mode="bypassPermissions",
+        # Explicit tool list — same as allowed_tools below. Keeps the
+        # bundled CLI from injecting Edit/Write/Skill/etc. that would
+        # mislead the model into thinking it's coding when it should be
+        # diagnosing.
+        tools=[
+            "Bash",
+            "Read",
+            "Glob",
+            "Grep",
+            "WebFetch",
+            "WebSearch",
+        ],
         mcp_servers={
             "nodemedic": nodemedic_server,
             "nr": nr_mcp_config(settings),
@@ -385,10 +408,20 @@ async def _drive_sdk_loop(
         },
         model=model_used,
         fallback_model=fallback_model,
+        # ANTHROPIC_API_KEY is the form the bundled Claude Code CLI
+        # reads (the SDK forwards env to the subprocess). The gateway
+        # also accepts the same NCT- token via x-api-key — verified
+        # empirically on cf1z 2026-06-14.
         env={
             "ANTHROPIC_BASE_URL": settings.anthropic_base_url,
+            "ANTHROPIC_API_KEY": settings.anthropic_auth_token,
             "ANTHROPIC_AUTH_TOKEN": settings.anthropic_auth_token,
         },
+        # SDK isolation mode — don't load CLAUDE.md, skills, agents, or
+        # any other filesystem state from the agent pod. The runbook IS
+        # the system prompt; nothing else should leak in.
+        setting_sources=[],
+        stderr=_stderr_logger,
     )
 
     user_prompt = build_user_prompt(case)
