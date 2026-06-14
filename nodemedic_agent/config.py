@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     azure_tenant_id: str = ""
     azure_client_id: str = ""
     azure_client_secret: str = ""
+    # Subscription is needed so `az` knows which scope to default to without
+    # the model having to discover it on every probe. Empty = leave the SP's
+    # default subscription active (whatever az resolves at login time).
+    azure_subscription_id: str = ""
 
     # SSH key for worker-node probes
     ssh_key_path: str = "/etc/nodemedic/ssh/id_ed25519"

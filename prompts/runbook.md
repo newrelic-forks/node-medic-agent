@@ -65,17 +65,36 @@ When `case.provider == "aws"`:
 
 When `case.provider == "azure"`:
 
-- `az vm get-instance-view --resource-group <rg> --name <instanceId>` —
-  capture the agent + extension status, power state, and any provisioning
-  failures. The resource group is the cluster's node resource group; if
-  unknown, look for a tag on the Node object.
-- `az vm list -d --query "[?name=='<instanceId>'].{name:name,
-  rg:resourceGroup,state:powerState}"` — fallback when
-  `get-instance-view` requires an RG you don't have.
-- If `az` returns `Unable to locate credentials` or `not authorized`:
-  skip Azure probes, calibrate confidence down, and rely on kubectl /
-  NRQL / SSH evidence. (cf1z's Azure SP is awaiting approval; this is
-  expected.)
+The agent process logs into the SP at startup via `az login
+--service-principal …`, so `az` invocations from `Bash` inherit a
+cached token without you having to authenticate. The default
+subscription is set to whatever `AZURE_SUBSCRIPTION_ID` was at
+startup.
+
+- For cf1z, the VMs sit in resource group `test-angry-bench` (the
+  cf1z-specific name; not all CAPI clusters follow the same RG
+  pattern, so always read the providerID rather than guessing). The
+  instance name visible to Azure is the VMSS instance INDEX (a small
+  integer like `4` or `12`), NOT the kubelet node name. Read the
+  providerID from the Node object to recover all four canonical Azure
+  identifiers:
+  `kubectl get node <nodeName> -o jsonpath='{.spec.providerID}'`
+  returns
+  `azure:///subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Compute/virtualMachineScaleSets/<vmss>/virtualMachines/<index>`.
+  Parse `<rg>`, `<vmss>`, and `<index>` from that string.
+- `az vmss get-instance-view --resource-group <rg> --name <vmss>
+  --instance-id <index>` — capture the agent + extension status,
+  power state, and any provisioning failures. (For VMSS-backed nodes —
+  most cf1z workers — this is the right command, not `az vm
+  get-instance-view`.)
+- `az vmss list-instances --resource-group <rg> --name <vmss>
+  --query "[?instanceId=='<index>'].{id:instanceId,
+  state:provisioningState,powerState:instanceView.statuses[1].displayStatus}"`
+  — fallback when `get-instance-view` doesn't surface what you need.
+- If `az` returns `Unable to locate credentials`, `not authorized`, or
+  any AAD error: skip Azure probes, calibrate confidence down, and
+  rely on kubectl / NRQL / SSH evidence. The startup login is
+  best-effort; the runbook never blocks on Azure being available.
 
 ## Evidence calibration
 

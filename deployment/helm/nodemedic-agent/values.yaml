@@ -51,7 +51,7 @@ secrets:
   anthropicTokenSecretName: "nodemedic-anthropic-token"  # data key: token
   nrTokenSecretName: "nodemedic-nr-token"                # data key: token
   sshKeySecretName: "nodemedic-ssh-key"                  # data key: id_ed25519
-  azureCredsSecretName: "nodemedic-azure-creds"          # keys: tenantId, clientId, clientSecret
+  azureCredsSecretName: "nodemedic-azure-creds"          # keys: tenantId, clientId, clientSecret, subscriptionId (optional)
 
 # Deployment-level knobs.
 replicaCount: 1   # FR-10: single replica (case-table coherence)

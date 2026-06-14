@@ -32,6 +32,7 @@ from nodemedic_agent.api.health import (
     handle_healthz,
     handle_readyz,
 )
+from nodemedic_agent.cloud.azure_login import login_if_configured as azure_login_if_configured
 from nodemedic_agent.config import Settings
 from nodemedic_agent.kube.nhd_writer import NHDWriter
 from nodemedic_agent.logging import configure_logging, get_logger
@@ -58,6 +59,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         case_table = CaseTable()
         await case_table.start_sweeper()
+
+        # Cache an SP login on the agent's az config dir if SP creds are
+        # mounted. Failures are non-fatal — the runbook handles
+        # missing/expired Azure creds by falling back to kubectl + ssh +
+        # NRQL evidence.
+        if settings.cloud_provider == "azure":
+            await azure_login_if_configured(settings)
 
         # Real kube config only when not in test (env CLUSTER_NAME starts
         # with "test-" is fine; we still try to load in-cluster config but
