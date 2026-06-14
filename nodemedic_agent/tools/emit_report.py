@@ -310,6 +310,7 @@ def make_emit_report(
     *,
     model_used: str,
     nhd_name: str | None = None,
+    outcome_sink: dict[str, Any] | None = None,
 ) -> SdkMcpTool[Any]:
     """Build the per-case `emit_report` tool.
 
@@ -321,8 +322,17 @@ def make_emit_report(
         nhd_name: ``metadata.name`` of the target NHD CR. Resolved from
             ``case.nhd_name`` (controller-supplied) or via the writer's
             list+filter fallback before the tool is constructed.
+        outcome_sink: optional mutable dict the tool stamps with the
+            terminal `WriteOutcome`, ``observed_phase``, and ``detail``
+            after the call completes. The runner uses this to map to
+            FR-11 ``case_complete`` shape without re-parsing the model
+            stream. ``emitted`` is also set to True. The sink is only
+            written on successful tool entry; runner-side timeouts /
+            exceptions are surfaced via the runner's own state.
     """
-    # Per-case mutable state for "already emitted" detection.
+    # Per-case mutable state for "already emitted" detection. Always a
+    # local dict regardless of whether outcome_sink is provided so we can
+    # detect duplicate calls.
     state: dict[str, Any] = {"emitted": False}
 
     @tool(
@@ -397,6 +407,11 @@ def make_emit_report(
         # 6. Mark emitted on every terminal outcome — even deferred and
         #    failed writes count as the case's single emit_report call.
         state["emitted"] = True
+        if outcome_sink is not None:
+            outcome_sink["emitted"] = True
+            outcome_sink["outcome"] = result.outcome
+            outcome_sink["observed_phase"] = result.observed_phase
+            outcome_sink["detail"] = result.detail
 
         if result.outcome is WriteOutcome.WRITTEN:
             return _ok_envelope(case_pid=case.case_id)
