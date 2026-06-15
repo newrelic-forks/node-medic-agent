@@ -48,12 +48,17 @@ func buildScheme(t *testing.T) *runtime.Scheme {
 // newFakeClient returns a controller-runtime fake client seeded with
 // objs. UI-side patches against the NHD via client.MergeFrom hit the
 // fake's in-memory store and survive across calls.
+//
+// The Pod spec.nodeName field index is registered so drain.PlanForNode
+// can use the same field-selector shape it uses against the real
+// apiserver (research R-3, FR-24).
 func newFakeClient(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()
 	sch := buildScheme(t)
 	return fake.NewClientBuilder().
 		WithScheme(sch).
 		WithObjects(objs...).
+		WithIndex(&corev1.Pod{}, "spec.nodeName", podNodeNameIndexer).
 		Build()
 }
 
@@ -66,7 +71,18 @@ func newFakeClientWithFuncs(t *testing.T, funcs interceptor.Funcs, objs ...clien
 		WithScheme(sch).
 		WithObjects(objs...).
 		WithInterceptorFuncs(funcs).
+		WithIndex(&corev1.Pod{}, "spec.nodeName", podNodeNameIndexer).
 		Build()
+}
+
+// podNodeNameIndexer mirrors the apiserver's spec.nodeName index so
+// the fake client can serve fields.OneTermEqualSelector queries.
+func podNodeNameIndexer(obj client.Object) []string {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return nil
+	}
+	return []string{pod.Spec.NodeName}
 }
 
 // newTestServer builds a server.Server with the given client + Phase 4
