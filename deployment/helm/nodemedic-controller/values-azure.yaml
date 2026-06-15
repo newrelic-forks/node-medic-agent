@@ -10,43 +10,48 @@
 #     ./deployment/helm/nodemedic-controller \
 #     -n cf-monitoring \
 #     -f deployment/helm/nodemedic-controller/values-azure.yaml \
-#     --set clusterName=cf1z
+#     --set clusterName=cf1z \
+#     --set image.tag=dev-cf1z-<sha>
 #
-# `clusterName` is deliberately not defaulted — set it explicitly per
-# install so an accidental file-only override can't bypass the per-
-# cluster guard.
+# `clusterName` and `image.tag` are deliberately not defaulted — set
+# both explicitly per install so an accidental file-only override can't
+# bypass the per-cluster guard or pin the chart to a stale image.
+#
+# This file mirrors the cf1z live install as of 2026-06-14 (Spec 002
+# closed, Spec 003 Phase 3 shipped). Keep in sync — `helm get values
+# nodemedic-controller -n cf-monitoring` should be a subset of what's
+# rendered from these values + the chart defaults in values.yaml.
 
 config:
-  agentURL: "http://nodemedic-agent.cf-monitoring.svc:8080/diagnose"
-  # DEMO: Scope 3's agent isn't deployed on cf1z yet — bypass it so
-  # the controller can drive its phase machine without DNS-failing on
-  # nodemedic-agent.cf-monitoring.svc. Flip back to false the moment
-  # the agent service exists in this namespace.
-  stubAgent: true
+  # Real agent on cf1z. Spec 002 closed; the nodemedic-agent service
+  # is live in cf-monitoring. Flip to true ONLY for stub-mode demo
+  # walkthroughs where the agent service is absent.
+  stubAgent: false
 
-  # Spec 003 on-call UI integration on cf1z. Until T029 ships, these
-  # env vars are present but unread by the controller binary.
-  # `useBlockKit: true` becomes the live behavior the moment T029
-  # lands; flipping to false is the demo-day rollback to the existing
-  # plain-text Slack format.
+  # cf1z runs hack-node-problem-detector with two custom plugins on top
+  # of the upstream NPD condition set. ContainerRuntimeUnhealthy and
+  # KubeletUnhealthy are the two conditions the chaos cronjobs trigger;
+  # without them in the watchedConditions list the controller would
+  # ignore chaos runs entirely. The remaining conditions are the
+  # spec NFR-6 baseline.
+  watchedConditions: "ContainerRuntimeUnhealthy,KubeletUnhealthy,ConntrackSaturated,FDExhaustion,PIDExhaustion,InodeExhaustion,DiskFill,DNSPartition,IMDSThrottle"
+
+  agentURL: "http://nodemedic-agent.cf-monitoring.svc:8080/diagnose"
+
+  # Spec 003 on-call UI integration on cf1z (Phase 3 shipped 2026-06-14
+  # at SHA 7aaf8cea). useBlockKit:true is the demo path; useBlockKit:
+  # false is the rollback target — one helm-value flip.
   useBlockKit: true
   uiBaseURL: "http://localhost:8080"
-  # Display string only — webhook routing lives in the
-  # `nodemedicSlack` Secret. Override at install time with
-  # `--set config.slackChannel='#cf-oncall-alerts'` to surface the
-  # channel that the cf1z webhook actually posts to.
+  # Display string only — webhook routing lives in the `nodemedicSlack`
+  # Secret. The cf1z webhook posts to #cf-oncall-alerts.
   slackChannel: "#cf-oncall-alerts"
 
 image:
-  # Hackathon dev image. Migrated 2026-06-14 from docker.io/shahrelic/
-  # hack-2026-nodemedic (sshah's personal Docker Hub repo) to the team
-  # cf-registry.nr-ops.net/container-fabric/nodemedic-controller path.
-  # Push works with developer cf-registry credentials (docker login
-  # cf-registry.nr-ops.net + email-as-username); no CI service-account
-  # is required, contrary to an earlier hypothesis.
+  # Migrated 2026-06-14 from docker.io/shahrelic/hack-2026-nodemedic
+  # (sshah's personal Docker Hub repo) to cf-registry. Push works with
+  # developer cf-registry credentials (docker login + email-as-username);
+  # no CI service-account is required.
   repository: cf-registry.nr-ops.net/container-fabric/nodemedic-controller
-  # Tag follows the merge commit on hackathon-2026/cf1z-baseline (PR #2
-  # merged 2026-06-14). Image was built from this commit on Apple
-  # Silicon via Colima after applying the Dockerfile BUILDPLATFORM fix
-  # (separate commit on this branch).
-  tag: "dev-cf1z-9e029aa9"
+  # tag is pinned per install via --set image.tag=dev-cf1z-<sha>; no
+  # default here so a chart-only override can't deploy a stale binary.
