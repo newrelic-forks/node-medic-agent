@@ -36,8 +36,8 @@ exclude = ["tests*"]
 
 [tool.uv]
 dev-dependencies = [
-    "pytest>=8.3,<9.0",
-    "pytest-asyncio>=0.24,<1.0",
+    "pytest>=9.0.3,<10.0",
+    "pytest-asyncio>=1.0,<2.0",
     "respx>=0.21,<1.0",
     "freezegun>=1.5,<2.0",
     "jsonschema>=4.23,<5.0",
