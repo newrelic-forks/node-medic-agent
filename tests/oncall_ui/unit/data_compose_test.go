@@ -5,9 +5,14 @@
 // primary invariant under test; each fixture combo (cordoned vs
 // uncordoned, skip-deletion stamped vs not, reclaimed) flips a
 // known boolean and the test asserts the resulting struct.
+//
+// T084 (US5) extends this file with composeActionHistory fixtures
+// that exercise the merged controller+UI history path (data-model.md
+// §4 composition rules).
 package unit
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -15,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	nodemedicv1alpha1 "k8s.io/node-problem-detector/api/v1alpha1"
+	"k8s.io/node-problem-detector/internal/oncall/audit"
 	"k8s.io/node-problem-detector/internal/oncall/render"
 )
 
@@ -284,4 +290,164 @@ func makeRunes(c byte, n int) string {
 		b[i] = c
 	}
 	return string(b)
+}
+
+// ---------------------------------------------------------------------
+// T084 (US5) — composeActionHistory merge fixtures
+//
+// data-model.md §4 composition rules:
+//   - controller's status.action (decision != "") → row {Actor:
+//     "controller", ActionVerb: "Cordon", Ts: appliedAt, Result: decision}
+//   - each ui-action-history annotation entry → row {Actor: "UI: " +
+//     entry.Actor, ActionVerb: verb-map(entry.Action), Ts: entry.Ts,
+//     Result: entry.Result + (" — " + entry.Detail if non-empty)}
+//   - sort by Ts ascending; engineer reads top-to-bottom
+// ---------------------------------------------------------------------
+
+// TestComposeActionHistory_ControllerOnly is the Phase 4 baseline path:
+// controller has acted, UI has not — exactly one row.
+func TestComposeActionHistory_ControllerOnly(t *testing.T) {
+	now := time.Date(2026, 6, 14, 16, 0, 0, 0, time.UTC)
+	nhd := makeNHD("nhd-controller-only", "node-a", now.Add(-30*time.Minute), nodemedicv1alpha1.PhaseActed, nodemedicv1alpha1.ActionDecisionApplied, 0.92)
+	// No annotation set; explicitly nil so the read path exercises the
+	// "annotations map is nil" branch the live cf1z NHDs hit pre-Phase-5.
+	nhd.Annotations = nil
+
+	d := render.ComposeDetailPageData(&nhd, makeNode("node-a", true, true), false)
+
+	if len(d.ActionHistory) != 1 {
+		t.Fatalf("ActionHistory length = %d, want 1 (controller-only path)", len(d.ActionHistory))
+	}
+	row := d.ActionHistory[0]
+	if row.Actor != "controller" {
+		t.Errorf("row.Actor = %q, want %q", row.Actor, "controller")
+	}
+	if row.ActionVerb != "Cordon" {
+		t.Errorf("row.ActionVerb = %q, want %q", row.ActionVerb, "Cordon")
+	}
+	if row.Result != string(nodemedicv1alpha1.ActionDecisionApplied) {
+		t.Errorf("row.Result = %q, want %q", row.Result, nodemedicv1alpha1.ActionDecisionApplied)
+	}
+	// Ts comes from status.action.appliedAt (created+2m per makeNHD).
+	wantTs := now.Add(-30*time.Minute + 2*time.Minute)
+	if !row.Ts.Equal(wantTs) {
+		t.Errorf("row.Ts = %v, want %v", row.Ts, wantTs)
+	}
+}
+
+// TestComposeActionHistory_ControllerPlusTwoUIEntries is the demo
+// finale shape — engineer ran uncordon and drain after the controller
+// cordoned. Three rows must be sorted ts-ascending: Cordon, Uncordon,
+// Drain.
+func TestComposeActionHistory_ControllerPlusTwoUIEntries(t *testing.T) {
+	now := time.Date(2026, 6, 14, 16, 0, 0, 0, time.UTC)
+	nhd := makeNHD("nhd-controller-plus-two", "node-b", now.Add(-30*time.Minute), nodemedicv1alpha1.PhaseActed, nodemedicv1alpha1.ActionDecisionApplied, 0.92)
+	// Controller's appliedAt is now-28m (created+2m). UI entries land
+	// at now-27m (uncordon) and now-26m (drain) — ts-ascending order
+	// is Cordon → Uncordon → Drain.
+	uncordonTs := now.Add(-27 * time.Minute)
+	drainTs := now.Add(-26 * time.Minute)
+	entries := []audit.UIActionEntry{
+		{Ts: uncordonTs, Action: "uncordon", Actor: "demo-anonymous", Result: "ok"},
+		{Ts: drainTs, Action: "drain", Actor: "demo-anonymous", Result: "partial", Detail: "evicted=12 skipped=3 errored=1"},
+	}
+	encoded, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatalf("encode entries: %v", err)
+	}
+	nhd.Annotations = map[string]string{audit.AnnotationKey: string(encoded)}
+
+	d := render.ComposeDetailPageData(&nhd, makeNode("node-b", true, true), false)
+
+	if len(d.ActionHistory) != 3 {
+		t.Fatalf("ActionHistory length = %d, want 3 (controller + 2 UI)", len(d.ActionHistory))
+	}
+	want := []struct {
+		actor, verb string
+	}{
+		{"controller", "Cordon"},
+		{"UI: demo-anonymous", "Uncordon"},
+		{"UI: demo-anonymous", "Drain"},
+	}
+	for i, w := range want {
+		got := d.ActionHistory[i]
+		if got.Actor != w.actor {
+			t.Errorf("row[%d].Actor = %q, want %q", i, got.Actor, w.actor)
+		}
+		if got.ActionVerb != w.verb {
+			t.Errorf("row[%d].ActionVerb = %q, want %q", i, got.ActionVerb, w.verb)
+		}
+	}
+	// Verify ts-ascending invariant explicitly so a future composition-
+	// rule regression doesn't slip through name/verb assertions alone.
+	for i := 1; i < len(d.ActionHistory); i++ {
+		if d.ActionHistory[i].Ts.Before(d.ActionHistory[i-1].Ts) {
+			t.Errorf("rows not ts-ascending at i=%d: %v before %v", i, d.ActionHistory[i].Ts, d.ActionHistory[i-1].Ts)
+		}
+	}
+	// Drain row's Result must carry the detail summary (composition
+	// rule: "Result + ' — ' + Detail if non-empty").
+	drainRow := d.ActionHistory[2]
+	if drainRow.Result != "partial — evicted=12 skipped=3 errored=1" {
+		t.Errorf("drain row Result = %q, want %q", drainRow.Result, "partial — evicted=12 skipped=3 errored=1")
+	}
+}
+
+// TestComposeActionHistory_UIOnly is the pre-controller-action edge
+// case — the engineer somehow took action before status.action was
+// stamped. Should produce a single UI-actor row with no controller
+// row leaking in.
+func TestComposeActionHistory_UIOnly(t *testing.T) {
+	now := time.Date(2026, 6, 14, 16, 0, 0, 0, time.UTC)
+	nhd := makeNHD("nhd-ui-only", "node-c", now.Add(-30*time.Minute), nodemedicv1alpha1.PhaseDiagnosed, "", 0)
+	nhd.Status.Action = nil
+
+	clearTs := now.Add(-25 * time.Minute)
+	entries := []audit.UIActionEntry{
+		{Ts: clearTs, Action: "clear-skip-deletion", Actor: "demo-anonymous", Result: "ok"},
+	}
+	encoded, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatalf("encode entries: %v", err)
+	}
+	nhd.Annotations = map[string]string{audit.AnnotationKey: string(encoded)}
+
+	d := render.ComposeDetailPageData(&nhd, makeNode("node-c", true, false), false)
+
+	if len(d.ActionHistory) != 1 {
+		t.Fatalf("ActionHistory length = %d, want 1 (UI-only path)", len(d.ActionHistory))
+	}
+	row := d.ActionHistory[0]
+	if row.Actor != "UI: demo-anonymous" {
+		t.Errorf("row.Actor = %q, want %q", row.Actor, "UI: demo-anonymous")
+	}
+	if row.ActionVerb != "ClearSkipDeletion" {
+		t.Errorf("row.ActionVerb = %q, want %q", row.ActionVerb, "ClearSkipDeletion")
+	}
+	if row.Result != "ok" {
+		t.Errorf("row.Result = %q, want %q (no detail → no separator)", row.Result, "ok")
+	}
+	if !row.Ts.Equal(clearTs) {
+		t.Errorf("row.Ts = %v, want %v", row.Ts, clearTs)
+	}
+}
+
+// TestComposeActionHistory_MalformedAnnotationFallsThroughToController
+// is the "tolerant decoder" guarantee — a malformed annotation value
+// (e.g. truncated bytes from a buggy past write) must NOT cause the
+// per-case page to lose the controller's history row. The annotation
+// is dropped; the controller half is still rendered.
+func TestComposeActionHistory_MalformedAnnotationFallsThroughToController(t *testing.T) {
+	now := time.Date(2026, 6, 14, 16, 0, 0, 0, time.UTC)
+	nhd := makeNHD("nhd-malformed", "node-d", now.Add(-30*time.Minute), nodemedicv1alpha1.PhaseActed, nodemedicv1alpha1.ActionDecisionApplied, 0.92)
+	nhd.Annotations = map[string]string{audit.AnnotationKey: `[{"ts":"`} // truncated JSON
+
+	d := render.ComposeDetailPageData(&nhd, makeNode("node-d", true, true), false)
+
+	if len(d.ActionHistory) != 1 {
+		t.Fatalf("ActionHistory length = %d, want 1 (malformed annotation should not break the controller half)", len(d.ActionHistory))
+	}
+	if d.ActionHistory[0].Actor != "controller" {
+		t.Errorf("row[0].Actor = %q, want %q", d.ActionHistory[0].Actor, "controller")
+	}
 }

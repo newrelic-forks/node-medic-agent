@@ -253,12 +253,12 @@ description: "Task list for NodeMedic On-Call UI + Slack Format Upgrade (Scope 4
 
 ### Tests for User Story 5
 
-- [ ] T084 [P] [US5] Extend `tests/oncall_ui/unit/data_compose_test.go` (T037) with US5-specific fixtures: NHD with controller `status.action.decision=Applied` + 0 UI entries → 1 row (Cordon controller); NHD with `status.action` + 2 UI entries (uncordon, drain) → 3 rows in `ts` ascending order; NHD with no `status.action` (pre-controller-action) + 1 UI entry → 1 row. **Must pass before T086.**
-- [ ] T085 [P] [US5] Author `tests/oncall_ui/integration/action_history_render_test.go` — drives a per-case GET against a fixture with multi-actor history; asserts the rendered HTML's `_action_history.html.tmpl` partial output contains the rows in the expected order with the expected actor strings (`controller` and `UI: demo-anonymous`).
+- [X] T084 [P] [US5] Extend `tests/oncall_ui/unit/data_compose_test.go` (T037) with US5-specific fixtures: NHD with controller `status.action.decision=Applied` + 0 UI entries → 1 row (Cordon controller); NHD with `status.action` + 2 UI entries (uncordon, drain) → 3 rows in `ts` ascending order; NHD with no `status.action` (pre-controller-action) + 1 UI entry → 1 row. **Must pass before T086.**
+- [X] T085 [P] [US5] Author `tests/oncall_ui/integration/action_history_render_test.go` — drives a per-case GET against a fixture with multi-actor history; asserts the rendered HTML's `_action_history.html.tmpl` partial output contains the rows in the expected order with the expected actor strings (`controller` and `UI: demo-anonymous`).
 
 ### Implementation for User Story 5
 
-- [ ] T086 [US5] Update `internal/oncall/render/data.go` (extend T040's `composeDetailPageData`): merge `status.action` (if `decision != ""`) into a controller-actor `ActionHistoryRow`; decode the `ui-action-history` annotation via `audit.readEntries` (T059) and map each `UIActionEntry` to an `ActionHistoryRow` per data-model.md §4.composition-rules; sort by `Ts` ascending. Update `internal/oncall/render/templates/_action_history.html.tmpl` to render the merged shape (caller already passes the slice).
+- [X] T086 [US5] Update `internal/oncall/render/data.go` (extend T040's `composeDetailPageData`): merge `status.action` (if `decision != ""`) into a controller-actor `ActionHistoryRow`; decode the `ui-action-history` annotation via `audit.readEntries` (T059) and map each `UIActionEntry` to an `ActionHistoryRow` per data-model.md §4.composition-rules; sort by `Ts` ascending. Update `internal/oncall/render/templates/_action_history.html.tmpl` to render the merged shape (caller already passes the slice).
 
 ### Build + push + deploy (US5 cf1z gate)
 

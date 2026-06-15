@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	nodemedicv1alpha1 "k8s.io/node-problem-detector/api/v1alpha1"
+	"k8s.io/node-problem-detector/internal/oncall/audit"
 )
 
 // MLCSkipDeletionAnnotation is the Node annotation key the Spec 001
@@ -347,13 +348,18 @@ func composeDiagnosisView(diag *nodemedicv1alpha1.Diagnosis) DiagnosisView {
 	return view
 }
 
-// composeActionHistory wires the controller's status.action into the
-// merged history. Phase 4 (T040) ships the controller half only; Phase
-// 7 (T086, US5) extends the function to decode the ui-action-history
-// annotation entries and merge them. The signature is the same in
-// both phases — callers in Phase 4 only see one row max.
+// composeActionHistory merges the controller's status.action with the
+// UI's audit annotation entries into a single ts-ascending slice per
+// data-model.md §4 composition rules.
 //
-// Bound by data-model.md §4 composition rules.
+// Phase 4 (T040) shipped the controller half only. Phase 7 (T086, US5)
+// adds the annotation-decode block. The cap (FR-18a / N=20) is
+// enforced on the WRITE path (audit.AppendEntry) — this read path
+// renders whatever's there, so a degenerate over-cap annotation still
+// surfaces every entry.
+//
+// Tolerant to a malformed annotation: a decode error drops the UI half
+// silently rather than breaking the per-case page.
 func composeActionHistory(nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI) []ActionHistoryRow {
 	rows := make([]ActionHistoryRow, 0, 4)
 	if nhd.Status.Action != nil && nhd.Status.Action.Decision != "" {
@@ -368,8 +374,50 @@ func composeActionHistory(nhd *nodemedicv1alpha1.NodeHealthDiagnosisAI) []Action
 			Result:     string(nhd.Status.Action.Decision),
 		})
 	}
+	if nhd.Annotations != nil {
+		raw := nhd.Annotations[audit.AnnotationKey]
+		entries, err := audit.ReadEntries(raw)
+		if err == nil {
+			for _, e := range entries {
+				rows = append(rows, ActionHistoryRow{
+					Ts:         e.Ts,
+					Actor:      "UI: " + e.Actor,
+					ActionVerb: actionVerbForEntry(e.Action),
+					Result:     formatActionResult(e.Result, e.Detail),
+				})
+			}
+		}
+	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		return rows[i].Ts.Before(rows[j].Ts)
 	})
 	return rows
+}
+
+// actionVerbForEntry maps a UIActionEntry.Action enum to the human-
+// readable verb the action-history table renders. Unknown values fall
+// through to the raw string so a future verb (e.g. "drain-cancel")
+// shows up in the UI without a code change to render — the contract
+// validator on the write path is the gatekeeper.
+func actionVerbForEntry(action string) string {
+	switch action {
+	case "uncordon":
+		return "Uncordon"
+	case "drain":
+		return "Drain"
+	case "clear-skip-deletion":
+		return "ClearSkipDeletion"
+	default:
+		return action
+	}
+}
+
+// formatActionResult composes the row's Result column per data-model.md
+// §4: `result` alone, or `result — detail` when detail is non-empty.
+// The em-dash matches the spec text verbatim.
+func formatActionResult(result, detail string) string {
+	if detail == "" {
+		return result
+	}
+	return result + " — " + detail
 }
