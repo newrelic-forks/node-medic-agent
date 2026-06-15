@@ -262,13 +262,13 @@ description: "Task list for NodeMedic On-Call UI + Slack Format Upgrade (Scope 4
 
 ### Build + push + deploy (US5 cf1z gate)
 
-- [ ] T087 [US5] `go test ./...` (all green) + `make nodemedic-oncall-ui-docker-build TAG=dev-cf1z-$SHA` + push.
-- [ ] T088 [US5] `helm --kube-context=cf1z upgrade nodemedic-oncall-ui … --set image.tag=dev-cf1z-$SHA --wait`.
+- [X] T087 [US5] `go test ./...` (all green) + `make nodemedic-oncall-ui-docker-build TAG=dev-cf1z-$SHA` + push.
+- [X] T088 [US5] `helm --kube-context=cf1z upgrade nodemedic-oncall-ui … --set image.tag=dev-cf1z-$SHA --wait`.
 
 ### US5 cf1z E2E gate — quickstart Scenario I full + AC-14 demo finale
 
-- [ ] T089 [US5] **AC-10 gate** — quickstart Scenario I (US5 surfacing): after T066 + T068 (uncordon + clear-skip-deletion on the same NHD), the per-case page's "Action history" section shows three rows in timestamp ascending order: `Cordon (controller, T+0:00)`, `Uncordon (UI: demo-anonymous, T+~0:30)`, `ClearSkipDeletion (UI: demo-anonymous, T+~0:35)`. Each row's actor + verb + result is correctly labeled. (If T083's drain ran on the same NHD, a fourth `Drain (UI: demo-anonymous, ...)` row appears.)
-- [ ] T090 [US5] **AC-14 demo finale full walkthrough** — quickstart Scenario P: time the end-to-end demo path from chaos trigger to action complete. Trigger `chaos-kubelet-unhealthy` (or `chaos-containerd-unhealthy`); ~30 s later Slack lands; engineer clicks View; per-case page renders; engineer clicks Uncordon → confirm; page refreshes with the new audit row visible; engineer clicks Clear MLC skipDeletion → confirm; ~30 s later MLC reclaims the node. Total wall-clock from Slack arrival to action complete ≤ 60 s. Every screen renders without errors. The audit annotation shows the controller's cordon + the engineer's two UI actions in order on the per-case page.
+- [X] T089 [US5] **AC-10 gate** — quickstart Scenario I (US5 surfacing): after T066 + T068 (uncordon + clear-skip-deletion on the same NHD), the per-case page's "Action history" section shows three rows in timestamp ascending order: `Cordon (controller, T+0:00)`, `Uncordon (UI: demo-anonymous, T+~0:30)`, `ClearSkipDeletion (UI: demo-anonymous, T+~0:35)`. Each row's actor + verb + result is correctly labeled. (If T083's drain ran on the same NHD, a fourth `Drain (UI: demo-anonymous, ...)` row appears.)
+- [X] T090 [US5] **AC-14 demo finale full walkthrough** — quickstart Scenario P: time the end-to-end demo path from chaos trigger to action complete. Trigger `chaos-kubelet-unhealthy` (or `chaos-containerd-unhealthy`); ~30 s later Slack lands; engineer clicks View; per-case page renders; engineer clicks Uncordon → confirm; page refreshes with the new audit row visible; engineer clicks Clear MLC skipDeletion → confirm; ~30 s later MLC reclaims the node. Total wall-clock from Slack arrival to action complete ≤ 60 s. Every screen renders without errors. The audit annotation shows the controller's cordon + the engineer's two UI actions in order on the per-case page.
 
 **Checkpoint (US5 done — full feature complete)**: AC-10, AC-14 green on cf1z. The audit story is closed: every action appears in one place, attributable to controller or UI, sorted in time. The demo finale walks end-to-end.
 
