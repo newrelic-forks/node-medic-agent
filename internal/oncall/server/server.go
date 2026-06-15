@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,14 +25,21 @@ type Config struct {
 	AuditBufferSize  int
 }
 
-// Server is the on-call UI's HTTP service. Phase 2 ships the route
-// table with stub handlers (501 Not Implemented for every endpoint);
-// later phases attach real handlers via SetHandler.
+// Server is the on-call UI's HTTP service. The route table is built
+// once in New(); each product route reads its handler from the
+// `routes` map at request time. SetRouteHandler replaces a stubbed
+// 501 handler with a real one (or vice versa) without re-routing
+// the mux. This keeps the route table immutable from the test
+// harness's perspective while letting Phases 4/5/6 swap real
+// handlers in.
 type Server struct {
-	cfg    Config
-	kc     client.Client
-	logger *Logger
-	mux    *http.ServeMux
+	cfg      Config
+	kc       client.Client
+	logger   *Logger
+	mux      *http.ServeMux
+	routes   map[string]http.HandlerFunc
+	routesMu sync.RWMutex
+	staticH  http.Handler
 }
 
 // New builds a Server with the given config and kube client. The kube
@@ -59,6 +67,7 @@ func New(cfg Config, kc client.Client) (*Server, error) {
 		kc:     kc,
 		logger: logger,
 		mux:    http.NewServeMux(),
+		routes: make(map[string]http.HandlerFunc),
 	}
 	s.registerRoutes()
 	return s, nil
@@ -81,6 +90,7 @@ func NewStubServer() *Server {
 		kc:     nil,
 		logger: logger,
 		mux:    http.NewServeMux(),
+		routes: make(map[string]http.HandlerFunc),
 	}
 	s.registerRoutes()
 	return s
@@ -144,20 +154,101 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
-// registerRoutes wires the six routes per plan + contracts/oncall-ui-api.yaml,
-// plus a /healthz probe target. Real handler bodies for the six product
-// routes arrive in Phases 4/5/6; Phase 2 stubs return 501 with the
-// Content-Type each consumer expects. /healthz returns 200 from Phase 2
-// onward so the kubelet probes don't require the product handlers to be
-// real before the pod is marked Ready.
+// registerRoutes wires the six product routes plus /healthz and the
+// /static/ asset prefix. Each product-route key indexes into
+// s.routes; SetRouteHandler swaps the live handler in place. Until a
+// later phase calls SetRouteHandler the route serves its stub.
+//
+// The static asset handler is set lazily by SetStaticHandler — Phase
+// 2 carries no static assets, so it returns 404 until rendered
+// templates land in Phase 4.
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
-	s.mux.HandleFunc("GET /", s.handleStubHTML)
-	s.mux.HandleFunc("GET /api/cases", s.handleStubJSON)
-	s.mux.HandleFunc("GET /cases/{nhd}", s.handleStubHTML)
-	s.mux.HandleFunc("POST /api/cases/{nhd}/actions/uncordon", s.handleStubJSON)
-	s.mux.HandleFunc("POST /api/cases/{nhd}/actions/clear-skip-deletion", s.handleStubJSON)
-	s.mux.HandleFunc("POST /api/cases/{nhd}/actions/drain", s.handleStubSSE)
+
+	stubHTML := s.handleStubHTML
+	stubJSON := s.handleStubJSON
+	stubSSE := s.handleStubSSE
+
+	s.routes["GET /"] = stubHTML
+	s.routes["GET /api/cases"] = stubJSON
+	s.routes["GET /cases/{nhd}"] = stubHTML
+	s.routes["POST /api/cases/{nhd}/actions/uncordon"] = stubJSON
+	s.routes["POST /api/cases/{nhd}/actions/clear-skip-deletion"] = stubJSON
+	s.routes["POST /api/cases/{nhd}/actions/drain"] = stubSSE
+
+	s.mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		// ServeMux's GET pattern matches the root; subroutes for
+		// /cases/, /api/, /static/ are registered explicitly below.
+		// ServeMux still routes to the most specific match.
+		s.dispatch("GET /", w, r)
+	})
+	s.mux.HandleFunc("GET /api/cases", func(w http.ResponseWriter, r *http.Request) {
+		s.dispatch("GET /api/cases", w, r)
+	})
+	s.mux.HandleFunc("GET /cases/{nhd}", func(w http.ResponseWriter, r *http.Request) {
+		s.dispatch("GET /cases/{nhd}", w, r)
+	})
+	s.mux.HandleFunc("POST /api/cases/{nhd}/actions/uncordon", func(w http.ResponseWriter, r *http.Request) {
+		s.dispatch("POST /api/cases/{nhd}/actions/uncordon", w, r)
+	})
+	s.mux.HandleFunc("POST /api/cases/{nhd}/actions/clear-skip-deletion", func(w http.ResponseWriter, r *http.Request) {
+		s.dispatch("POST /api/cases/{nhd}/actions/clear-skip-deletion", w, r)
+	})
+	s.mux.HandleFunc("POST /api/cases/{nhd}/actions/drain", func(w http.ResponseWriter, r *http.Request) {
+		s.dispatch("POST /api/cases/{nhd}/actions/drain", w, r)
+	})
+
+	s.mux.HandleFunc("GET /static/", func(w http.ResponseWriter, r *http.Request) {
+		s.routesMu.RLock()
+		h := s.staticH
+		s.routesMu.RUnlock()
+		if h == nil {
+			http.NotFound(w, r)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// SetRouteHandler swaps a route's handler in place. Caller passes the
+// exact key registered in registerRoutes.
+func (s *Server) SetRouteHandler(key string, h http.HandlerFunc) {
+	s.routesMu.Lock()
+	defer s.routesMu.Unlock()
+	if _, ok := s.routes[key]; !ok {
+		// Mis-typed key — surface in tests instead of silently
+		// becoming a 501.
+		panic("server: unknown route key: " + key)
+	}
+	s.routes[key] = h
+}
+
+// SetStaticHandler attaches the /static/ asset handler. Phase 4
+// passes an http.FileServer wrapping render.StaticFS().
+func (s *Server) SetStaticHandler(h http.Handler) {
+	s.routesMu.Lock()
+	defer s.routesMu.Unlock()
+	s.staticH = h
+}
+
+// Client returns the kube client wired into the server. Handlers
+// constructed against this server use it for apiserver round-trips.
+func (s *Server) Client() client.Client { return s.kc }
+
+// Config returns a copy of the server's effective configuration.
+// Handlers read Namespace, UIBaseURL, etc. from this.
+func (s *Server) Cfg() Config { return s.cfg }
+
+// dispatch routes a request to the current handler under key.
+func (s *Server) dispatch(key string, w http.ResponseWriter, r *http.Request) {
+	s.routesMu.RLock()
+	h := s.routes[key]
+	s.routesMu.RUnlock()
+	if h == nil {
+		http.NotFound(w, r)
+		return
+	}
+	h(w, r)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {

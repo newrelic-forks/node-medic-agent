@@ -10,12 +10,15 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
 
+	"k8s.io/node-problem-detector/internal/oncall/handlers"
 	"k8s.io/node-problem-detector/internal/oncall/kube"
+	"k8s.io/node-problem-detector/internal/oncall/render"
 	"k8s.io/node-problem-detector/internal/oncall/server"
 )
 
@@ -42,6 +45,19 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
 	}
+
+	// Phase 4 (US2) — list + detail handlers.
+	listDeps := handlers.ListDeps{Client: kc, Namespace: cfg.Namespace, Logger: srv.Logger()}
+	detailDeps := handlers.DetailDeps{Client: kc, Namespace: cfg.Namespace, Logger: srv.Logger()}
+	srv.SetRouteHandler("GET /", handlers.ListHTML(listDeps))
+	srv.SetRouteHandler("GET /api/cases", handlers.ListJSON(listDeps))
+	srv.SetRouteHandler("GET /cases/{nhd}", handlers.DetailHTML(detailDeps))
+	srv.SetStaticHandler(http.StripPrefix("/static/", http.FileServer(http.FS(render.StaticFS()))))
+
+	// Phase 5 (US3) — uncordon + clear-skip-deletion handlers wired
+	// in attachActions; falls through to 501 stub if helpers aren't
+	// loaded yet (e.g. during a partial Phase-5 build).
+	attachActions(srv, kc, cfg)
 
 	srv.Logger().Log("startup_complete",
 		"listen_addr", cfg.ListenAddr,

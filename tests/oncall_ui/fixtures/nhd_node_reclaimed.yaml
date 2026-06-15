@@ -1,0 +1,55 @@
+# T036 fixture — NHD whose referenced node has been reclaimed by MLC.
+# The Node CR no longer exists in the cluster; FR-17a says action
+# endpoints return 200 with `{result: "node no longer exists (already
+# reclaimed)"}` and the per-case page shows a "Node was reclaimed by
+# MLC" banner with all three buttons disabled.
+apiVersion: nodemedic.cf.newrelic.com/v1alpha1
+kind: NodeHealthDiagnosisAI
+metadata:
+  name: cf1z-general-nodes-2000002-1718373500
+  namespace: cf-monitoring
+  creationTimestamp: "2026-06-14T15:18:20Z"
+  uid: 44444444-4444-4444-8444-444444444444
+spec:
+  case:
+    caseId: dddddddd-dddd-4ddd-8ddd-dddddddddddd
+    # nodeName references a node that has since been deleted by MLC —
+    # tests assert the kube-fake client doesn't carry a Node with this
+    # name.
+    nodeName: cf1z-general-nodes-2000002
+    clusterName: cf1z
+    provider: azure
+    region: eastus2
+    instanceId: cf1z-general-nodes-2000002-vm
+    trigger:
+      type: KubeletUnhealthy
+      reason: KubeletNotReady
+      message: "kubelet not ready"
+      observedAt: "2026-06-14T15:18:10Z"
+  budgets:
+    maxTurns: 15
+    maxBudgetUSD: "0.50"
+status:
+  phase: Acted
+  diagnosis:
+    rootCause: "kubelet was unhealthy; node was cordoned and MLC reclaimed it."
+    rcaCategory: Kubelet
+    confidence: 0.85
+    evidence:
+      - source: kubectl
+        ref: "kubectl get node cf1z-general-nodes-2000002 -o yaml"
+        result: "status.conditions[type=Ready].status=False"
+        observedAt: "2026-06-14T15:18:50Z"
+      - source: ssh
+        ref: "systemctl status kubelet"
+        result: "Active: failed"
+        observedAt: "2026-06-14T15:18:52Z"
+    recommendation:
+      action: Cordon
+      reason: "kubelet unhealthy"
+    modelUsed: "claude-haiku-4-5"
+    completedAt: "2026-06-14T15:19:00Z"
+  action:
+    decision: Applied
+    operation: cordon
+    appliedAt: "2026-06-14T15:19:10Z"

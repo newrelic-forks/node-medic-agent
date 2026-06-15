@@ -1,0 +1,68 @@
+# T036 fixture — Applied case (cordoned + skipDeletion-stamped node).
+# The demo's headline shape: gate passed, controller cordoned + stamped
+# the MLC skipDeletion annotation. UI buttons: Uncordon enabled, Drain
+# enabled, ClearSkipDeletion enabled.
+#
+# Used by:
+#   - tests/oncall_ui/unit/data_compose_test.go (T037)
+#   - tests/oncall_ui/integration/list_handler_test.go (T038)
+#   - tests/oncall_ui/integration/detail_handler_test.go (T039)
+#   - tests/oncall_ui/integration/action_uncordon_test.go (T056)
+#   - tests/oncall_ui/integration/action_clear_skip_test.go (T057)
+apiVersion: nodemedic.cf.newrelic.com/v1alpha1
+kind: NodeHealthDiagnosisAI
+metadata:
+  name: cf1z-general-nodes-1000007-1718374200
+  namespace: cf-monitoring
+  creationTimestamp: "2026-06-14T15:30:00Z"
+  uid: 11111111-1111-4111-8111-111111111111
+spec:
+  case:
+    caseId: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+    nodeName: cf1z-general-nodes-1000007
+    clusterName: cf1z
+    provider: azure
+    region: eastus2
+    instanceId: cf1z-general-nodes-1000007-vm
+    trigger:
+      type: KubeletUnhealthy
+      reason: KubeletNotReady
+      message: "kubelet is not ready"
+      observedAt: "2026-06-14T15:29:50Z"
+  budgets:
+    maxTurns: 15
+    maxBudgetUSD: "0.50"
+status:
+  phase: Acted
+  conditions:
+    - type: ReportReady
+      status: "True"
+      reason: Diagnosed
+      message: "agent diagnosis written"
+      lastTransitionTime: "2026-06-14T15:31:00Z"
+  diagnosis:
+    rootCause: "kubelet failed to renew its node lease after the host's container runtime entered an inconsistent state. Restarting kubelet and the runtime would clear it; reclaim is faster."
+    rcaCategory: Kubelet
+    confidence: 0.92
+    evidence:
+      - source: kubectl
+        ref: "kubectl get node cf1z-general-nodes-1000007 -o yaml"
+        result: "status.conditions[type=Ready].status=False; lastHeartbeatTime stale by 4m"
+        observedAt: "2026-06-14T15:30:30Z"
+      - source: ssh
+        ref: "systemctl status kubelet"
+        result: "Active: active (running) since Mon 2026-06-14 08:00:00 UTC; 7h 30min ago — but not heartbeating to the apiserver"
+        observedAt: "2026-06-14T15:30:32Z"
+      - source: nrql
+        ref: "FROM SystemSample SELECT average(cpuPercent) WHERE hostname = 'cf1z-general-nodes-1000007' SINCE 1 hour ago"
+        result: "spike to 98% at T-15m"
+        observedAt: "2026-06-14T15:30:35Z"
+    recommendation:
+      action: Cordon
+      reason: "Kubelet is unhealthy and not recovering; cordoning lets MLC reclaim the VM."
+    modelUsed: "claude-haiku-4-5"
+    completedAt: "2026-06-14T15:31:00Z"
+  action:
+    decision: Applied
+    operation: cordon
+    appliedAt: "2026-06-14T15:31:30Z"

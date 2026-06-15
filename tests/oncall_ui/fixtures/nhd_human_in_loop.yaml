@@ -1,0 +1,54 @@
+# T036 fixture — HumanInLoop case (low-confidence, gate failed).
+# Controller routed to HumanInLoop because the agent's confidence was
+# below the gate threshold OR the recommendation was NoAction. UI
+# buttons: enabled per node state (which here is uncordoned; the
+# controller did not cordon).
+apiVersion: nodemedic.cf.newrelic.com/v1alpha1
+kind: NodeHealthDiagnosisAI
+metadata:
+  name: cf1z-general-nodes-1000008-1718374100
+  namespace: cf-monitoring
+  creationTimestamp: "2026-06-14T15:28:20Z"
+  uid: 22222222-2222-4222-8222-222222222222
+spec:
+  case:
+    caseId: bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb
+    nodeName: cf1z-general-nodes-1000008
+    clusterName: cf1z
+    provider: azure
+    region: eastus2
+    instanceId: cf1z-general-nodes-1000008-vm
+    trigger:
+      type: ContainerRuntimeUnhealthy
+      reason: ContainerdUnhealthy
+      message: "containerd hung"
+      observedAt: "2026-06-14T15:28:10Z"
+  budgets:
+    maxTurns: 15
+    maxBudgetUSD: "0.50"
+status:
+  phase: Acted
+  conditions:
+    - type: ReportReady
+      status: "True"
+      reason: GateFailed
+      message: "confidence 0.40 < 0.7 threshold; routed to HumanInLoop"
+      lastTransitionTime: "2026-06-14T15:29:30Z"
+  diagnosis:
+    rootCause: "containerd may be hung but the available evidence is thin — only one signal source confirmed, gate-evaluator declined to auto-cordon."
+    rcaCategory: Kubelet
+    confidence: 0.40
+    evidence:
+      - source: kubectl
+        ref: "kubectl get node cf1z-general-nodes-1000008 -o yaml"
+        result: "status.conditions[type=Ready].status=Unknown"
+        observedAt: "2026-06-14T15:29:20Z"
+    recommendation:
+      action: NoAction
+      reason: "Insufficient evidence — engineer judgment recommended."
+    modelUsed: "claude-haiku-4-5"
+    completedAt: "2026-06-14T15:29:30Z"
+  action:
+    decision: HumanInLoop
+    operation: noop
+    appliedAt: "2026-06-14T15:29:35Z"

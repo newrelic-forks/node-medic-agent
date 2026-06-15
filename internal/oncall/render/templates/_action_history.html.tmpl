@@ -1,0 +1,19 @@
+{{define "_action_history"}}
+<section class="action-history">
+  <h2>Action history</h2>
+  {{if .}}
+  <ol class="action-history-list">
+    {{range .}}
+    <li class="action-history-row">
+      <time>{{formatTime .Ts}}</time>
+      <span class="actor">{{.Actor}}</span>
+      <span class="verb">{{.ActionVerb}}</span>
+      <span class="result">{{.Result}}</span>
+    </li>
+    {{end}}
+  </ol>
+  {{else}}
+  <p class="empty">No actions taken yet.</p>
+  {{end}}
+</section>
+{{end}}
