@@ -11,3 +11,26 @@ coverage.out
 .idea/
 *.DS_Store
 *.iml
+
+# Python (nodemedic-agent)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+.tox/
+build/
+dist/
+*.whl
+
+# Editors
+.vscode/
+/out/

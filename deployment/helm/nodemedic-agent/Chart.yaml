@@ -1,0 +1,22 @@
+apiVersion: v2
+name: nodemedic-agent
+description: |
+  NodeMedic agent (Scope 3 of AFA 2026 hackathon). Receives POST /diagnose
+  from the controller, runs an isolated Claude Agent SDK loop per case
+  against the New Relic nerd-completion gateway, gathers evidence via Bash
+  (kubectl, aws, az, ssh, /proc) and the public NR HTTP MCP, and writes
+  the diagnosis to status.diagnosis on the existing NodeHealthDiagnosisAI
+  CR. Runs only on non-production clusters (Constitution Article I.5).
+  See .specify/specs/002-nodemedic-agent/ in the source repo.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.28.0-0"
+maintainers:
+  - name: Container Fabric
+    url: https://source.datanerd.us/container-fabric
+keywords:
+  - kubernetes
+  - ai-agent
+  - node-health
+  - nodemedic

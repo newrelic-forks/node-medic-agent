@@ -1,0 +1,56 @@
+# Default values for the NodeMedic on-call UI chart.
+# Per Constitution Article I.5, `clusterName` MUST be one of
+# cf1z/jc1z/sk1z or start with `test-`; the chart's _helpers.tpl
+# `nodemedic-oncall-ui.requireTestCluster` template refuses to render
+# if it doesn't.
+
+# REQUIRED. The cluster name passed to the UI binary via --cluster-name.
+# Set explicitly per install — leaving it empty here forces the helper
+# guard to fire, defending against an accidental cluster-default override.
+clusterName: ""
+
+# UI image.
+image:
+  repository: cf-registry.nr-ops.net/container-fabric/nodemedic-oncall-ui
+  tag: ""           # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# UI runtime configuration. Passed to the binary as flags (and as env
+# vars for forward-compat with shells that prefer env).
+config:
+  # Namespace where the UI reads NodeHealthDiagnosisAI CRs from.
+  namespace: cf-monitoring
+  # Base URL the UI is reachable at. Demo path is
+  # `kubectl port-forward svc/nodemedic-oncall-ui 8080:8080`.
+  uiBaseURL: "http://localhost:8080"
+  # Bounded concurrency for the eviction loop (research R-3).
+  drainConcurrency: 3
+  # FIFO ring buffer cap for the ui-action-history annotation (FR-18a).
+  auditBufferSize: 20
+  # JSON logger level. The action audit logger emits at info; debug is
+  # noisier (per-request access logs at finer granularity).
+  logLevel: "info"
+
+# Single replica is the design — DrainProgress is process-local, and
+# the UI is stateless beyond that. Multi-replica would need leader
+# election or a shared kv for in-flight drain coalescing.
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Service for the UI HTTP endpoint.
+service:
+  type: ClusterIP
+  port: 8080

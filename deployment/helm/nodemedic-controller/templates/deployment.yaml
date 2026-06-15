@@ -1,0 +1,92 @@
+{{- $_ := include "nodemedic.requireTestCluster" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nodemedic.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nodemedic.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "nodemedic.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "nodemedic.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "nodemedic.fullname" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: {{ include "nodemedic.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--cluster-name={{ .Values.clusterName }}"
+            - "--watched-conditions={{ .Values.config.watchedConditions }}"
+            - "--min-confidence={{ .Values.config.minConfidence }}"
+            - "--min-evidence-sources={{ .Values.config.minEvidenceSources }}"
+            - "--agent-url={{ .Values.config.agentURL }}"
+            - "--debounce-window={{ .Values.config.debounceWindow }}"
+            - "--deadline-window={{ .Values.config.deadlineWindow }}"
+            - "--retry-deadline-extension={{ .Values.config.retryDeadlineExtension }}"
+            - "--metrics-bind-address=:{{ .Values.service.metricsPort }}"
+            - "--health-probe-bind-address=:{{ .Values.service.probePort }}"
+            {{- if .Values.config.stubAgent }}
+            - "--stub-agent"
+            {{- end }}
+          env:
+            - name: NODEMEDIC_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.agentTokenSecretName }}
+                  key: token
+            - name: NODEMEDIC_SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.slackWebhookSecretName }}
+                  key: webhook-url
+            # Spec 003 on-call UI plumbing. The controller binary's flag
+            # parser (T029) binds these env vars to --use-block-kit,
+            # --ui-base-url, --slack-channel. Until T029 ships, the
+            # controller silently ignores them.
+            - name: USE_BLOCK_KIT
+              value: {{ .Values.config.useBlockKit | quote }}
+            - name: UI_BASE_URL
+              value: {{ .Values.config.uiBaseURL | quote }}
+            - name: SLACK_CHANNEL
+              value: {{ .Values.config.slackChannel | quote }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
+            - name: probe
+              containerPort: {{ .Values.service.probePort }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

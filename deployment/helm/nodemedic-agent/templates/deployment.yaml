@@ -1,0 +1,162 @@
+{{- $_ := include "nodemedic-agent.requireTestCluster" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nodemedic-agent.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nodemedic-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "nodemedic-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "nodemedic-agent.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "nodemedic-agent.fullname" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # fsGroup so kubelet chowns the secret-mounted SSH key to the
+        # pod's gid; with defaultMode 0o440 below the agent (uid 1000)
+        # can then read the key. Without this OpenSSH refuses with
+        # "Load key …: Permission denied" because the file is owned
+        # root:0 mode 400, unreadable to a non-root pod.
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+        - name: ssh-key
+          secret:
+            secretName: {{ .Values.secrets.sshKeySecretName }}
+            # 0o440 = owner read + group read; combined with fsGroup
+            # the pod's gid 1000 has read access. NOT 0o444 — keep the
+            # other-bit unreadable so any sidecar / init that doesn't
+            # share fsGroup can't see the key.
+            defaultMode: 0o440
+      containers:
+        - name: agent
+          image: {{ include "nodemedic-agent.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # The bundled Claude Code CLI (claude_agent_sdk subprocess)
+            # writes session state under $HOME/.claude. The pod's
+            # readOnlyRootFilesystem blocks writes to /app, so HOME
+            # must point at the tmp emptyDir below. Without this every
+            # Bash tool invocation fails with EROFS and the loop emits
+            # a thin NoAction report — verified empirically on cf1z
+            # 2026-06-14.
+            - name: HOME
+              value: "/tmp"
+            # Topology
+            - name: CLUSTER_NAME
+              value: {{ include "nodemedic-agent.requireTestCluster" . | quote }}
+            - name: CLOUD_PROVIDER
+              value: {{ required "cloud.provider must be set ('aws' or 'azure')" .Values.cloud.provider | quote }}
+            - name: KUBE_NAMESPACE
+              value: {{ .Values.config.kubeNamespace | quote }}
+            # Concurrency / runtime config
+            - name: MAX_CONCURRENT_CASES
+              value: {{ .Values.config.maxConcurrentCases | quote }}
+            - name: STUB_AGENT
+              value: {{ .Values.config.stubAgent | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.config.logLevel | quote }}
+            - name: READYZ_PROBE_TIMEOUT_SEC
+              value: {{ .Values.config.readyzProbeTimeoutSec | quote }}
+            - name: RUNBOOK_PATH
+              value: {{ .Values.config.runbookPath | quote }}
+            # Anthropic (nerd-completion gateway)
+            - name: CLAUDE_MODEL
+              value: {{ .Values.config.claudeModel | quote }}
+            - name: CLAUDE_FALLBACK_MODEL
+              value: {{ .Values.config.claudeFallbackModel | quote }}
+            - name: ANTHROPIC_BASE_URL
+              value: {{ .Values.config.anthropicBaseUrl | quote }}
+            - name: ANTHROPIC_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.anthropicTokenSecretName }}
+                  key: token
+            # New Relic HTTP MCP
+            - name: NR_MCP_URL
+              value: {{ required "config.nrMcpUrl must be set" .Values.config.nrMcpUrl | quote }}
+            - name: NR_ACCOUNT_ID
+              value: {{ .Values.config.nrAccountId | quote }}
+            - name: NR_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.nrTokenSecretName }}
+                  key: token
+            # SSH key path — file mount, see volumeMounts below.
+            - name: SSH_KEY_PATH
+              value: "/etc/nodemedic/ssh/id_ed25519"
+            {{- if eq .Values.cloud.provider "azure" }}
+            # Azure Service Principal — only mounted on Azure installs.
+            - name: AZURE_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.azureCredsSecretName }}
+                  key: tenantId
+            - name: AZURE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.azureCredsSecretName }}
+                  key: clientId
+            - name: AZURE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.azureCredsSecretName }}
+                  key: clientSecret
+            - name: AZURE_SUBSCRIPTION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.azureCredsSecretName }}
+                  key: subscriptionId
+                  optional: true
+            {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: ssh-key
+              mountPath: /etc/nodemedic/ssh
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

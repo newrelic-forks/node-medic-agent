@@ -1,0 +1,57 @@
+# Representative EKS Node fixture for unit + envtest harnesses.
+#
+# **REPLACE THIS WITH A REAL CAPTURE ON DAY 1 AM.** The shape below
+# matches what `kubectl get node <n> -o yaml --context=test-odd-wire`
+# returns on EKS managed nodegroups (June 2026 baseline), based on
+# documentation at:
+#   - https://kubernetes.io/docs/reference/labels-annotations-taints/
+#   - cloud-provider-aws Node controller (providerID format)
+#   - argo-webhook injects cf.newrelic.com/cloud-provider per CF CLAUDE.md
+#
+# providerid.ParseAWS expects `aws:///<az>/<instance-id>` and pulls the
+# last path segment (FR-2). Region comes from
+# topology.kubernetes.io/region. Provider preference: explicit
+# cf.newrelic.com/cloud-provider label, falling back to providerID URI
+# scheme.
+apiVersion: v1
+kind: Node
+metadata:
+  name: ip-10-1-2-3.us-east-2.compute.internal
+  labels:
+    kubernetes.io/arch: amd64
+    kubernetes.io/os: linux
+    kubernetes.io/hostname: ip-10-1-2-3.us-east-2.compute.internal
+    topology.kubernetes.io/region: us-east-2
+    topology.kubernetes.io/zone: us-east-2a
+    failure-domain.beta.kubernetes.io/region: us-east-2
+    failure-domain.beta.kubernetes.io/zone: us-east-2a
+    node.kubernetes.io/instance-type: m6i.xlarge
+    cf.newrelic.com/cloud-provider: aws
+    cf.newrelic.com/cluster-name: test-odd-wire
+    eks.amazonaws.com/nodegroup: general-pool-rnc-amd64-us-east-2a
+spec:
+  providerID: aws:///us-east-2a/i-0abc1234deadbeef
+  taints: []
+status:
+  conditions:
+    - type: Ready
+      status: "True"
+      lastHeartbeatTime: "2026-06-12T15:00:00Z"
+      lastTransitionTime: "2026-06-12T14:00:00Z"
+      reason: KubeletReady
+      message: kubelet is posting ready status
+    # ConntrackSaturated is the demo-driver condition for AC-2 / AC-3.
+    # The fault-injection harness flips status=True to start a case.
+    - type: ConntrackSaturated
+      status: "False"
+      lastHeartbeatTime: "2026-06-12T15:00:00Z"
+      lastTransitionTime: "2026-06-12T14:00:00Z"
+      reason: ConntrackOK
+      message: nf_conntrack_count well below max
+  nodeInfo:
+    kubeletVersion: v1.31.7-3
+    osImage: Ubuntu 22.04.4 LTS
+    kernelVersion: 6.5.0-1018-aws
+    containerRuntimeVersion: containerd://1.7.19
+    architecture: amd64
+    operatingSystem: linux

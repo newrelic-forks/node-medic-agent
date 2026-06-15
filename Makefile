@@ -372,3 +372,264 @@ goget:
 
 .PHONY: depup
 depup: goget gomod
+
+# =============================================================================
+# NodeMedic controller targets (Scope 2 — AFA 2026 hackathon).
+#
+# Spec: .specify/specs/001-nodemedic-controller/
+# These targets MUST NOT touch the existing NPD targets above. They use the
+# `nodemedic-` prefix and only operate on:
+#   cmd/nodemedic-controller/, api/, internal/nodemedic/,
+#   config/nodemedic/, deployment/helm/nodemedic-controller/,
+#   test/nodemedic/, Dockerfile.nodemedic-controller
+# =============================================================================
+
+NODEMEDIC_BIN ?= bin/nodemedic-controller
+# Default repo matches what's actually deployed on cf1z so help-text and
+# build/push commands round-trip without the operator having to override.
+# Override with `make … NODEMEDIC_IMG=…` if pushing to a different repo.
+NODEMEDIC_IMG ?= cf-registry.nr-ops.net/container-fabric/nodemedic-controller
+NODEMEDIC_HELM_DIR ?= deployment/helm/nodemedic-controller
+NODEMEDIC_PKGS ?= ./api/... ./cmd/nodemedic-controller/... ./internal/nodemedic/...
+
+# TAG defaults to dev-cf1z-<shortsha>; override with `make … NODEMEDIC_TAG=…`.
+# Mirrors the agent and oncall-ui tag conventions so cf1z deploys are
+# reproducible from the commit SHA.
+NODEMEDIC_TAG ?= dev-cf1z-$(shell git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
+
+# Pinned tool versions. Updated together when we bump controller-runtime.
+CONTROLLER_TOOLS_VERSION ?= v0.16.5
+ENVTEST_VERSION ?= release-0.19
+ENVTEST_K8S_VERSION ?= 1.31.0
+
+# Use `go run` so we don't pollute $GOPATH/bin and pin versions per-build.
+CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
+SETUP_ENVTEST  ?= go run sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION)
+
+.PHONY: nodemedic-help
+nodemedic-help:
+	@echo "NodeMedic controller targets:"
+	@echo "  nodemedic-build         build cmd/nodemedic-controller -> $(NODEMEDIC_BIN)"
+	@echo "  nodemedic-generate      run controller-gen object (deepcopy)"
+	@echo "  nodemedic-manifests     run controller-gen crd+rbac (writes config/nodemedic/...)"
+	@echo "  nodemedic-test          go test ./api/... ./cmd/nodemedic-controller/... ./internal/nodemedic/..."
+	@echo "  nodemedic-envtest       run envtest-backed reconciler tests under test/nodemedic/envtest"
+	@echo "  nodemedic-docker-build  build Dockerfile.nodemedic-controller -> $(NODEMEDIC_IMG):$(NODEMEDIC_TAG) (linux/amd64)"
+	@echo "  nodemedic-docker-push   docker push $(NODEMEDIC_IMG):$(NODEMEDIC_TAG)"
+	@echo "  nodemedic-helm-lint     helm lint $(NODEMEDIC_HELM_DIR)"
+	@echo "  nodemedic-helm-package  helm package $(NODEMEDIC_HELM_DIR)"
+	@echo "  nodemedic-clean         rm $(NODEMEDIC_BIN)"
+
+.PHONY: nodemedic-build
+nodemedic-build:
+	CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w" \
+	  -o $(NODEMEDIC_BIN) ./cmd/nodemedic-controller
+
+.PHONY: nodemedic-generate
+nodemedic-generate:
+	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./api/..."
+
+.PHONY: nodemedic-manifests
+# `crd:allowDangerousTypes=true` is required because the contract schema
+# (.specify/specs/001-nodemedic-controller/contracts/nhd-crd.yaml) uses
+# `type: number` for status.diagnosis.confidence — controller-gen flags
+# float64 fields as "dangerous" by default. The contract is the authority
+# (Constitution Article II.2), so we opt in to numeric encoding.
+#
+# After generation we copy the CRD into the Helm chart's files/crd/ dir
+# so `helm install` ships the same byte-for-byte CRD that controller-gen
+# produced.
+nodemedic-manifests:
+	$(CONTROLLER_GEN) \
+	  crd:allowDangerousTypes=true \
+	  rbac:roleName=nodemedic-controller \
+	  paths="./api/..." \
+	  paths="./internal/nodemedic/..." \
+	  output:crd:artifacts:config=config/nodemedic/crd \
+	  output:rbac:artifacts:config=config/nodemedic/rbac
+	@mkdir -p $(NODEMEDIC_HELM_DIR)/files/crd
+	@cp config/nodemedic/crd/*.yaml $(NODEMEDIC_HELM_DIR)/files/crd/
+	@echo "synced CRD into $(NODEMEDIC_HELM_DIR)/files/crd/"
+
+.PHONY: nodemedic-test
+nodemedic-test:
+	go test -timeout=2m -count=1 $(NODEMEDIC_PKGS)
+
+.PHONY: nodemedic-envtest
+# Integration tests use envtest's binary apiserver+etcd. They live
+# beside the production code under internal/nodemedic/controller/ but
+# are gated by `//go:build integration` so `go test ./...` stays fast.
+nodemedic-envtest:
+	@echo "Setting up envtest assets for Kubernetes $(ENVTEST_K8S_VERSION)..."
+	@$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path >/dev/null
+	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
+	  go test -tags=integration -timeout=5m -count=1 ./internal/nodemedic/controller/...
+
+.PHONY: nodemedic-docker-build
+# cf1z runs amd64 nodes only — single-arch keeps the build fast and
+# matches the deployed reality. Mirrors the agent and oncall-ui targets.
+# `--load` puts the image into the local docker daemon so a subsequent
+# `nodemedic-docker-push` finds it.
+nodemedic-docker-build:
+	docker buildx build \
+	  -f Dockerfile.nodemedic-controller \
+	  --platform linux/amd64 \
+	  -t $(NODEMEDIC_IMG):$(NODEMEDIC_TAG) \
+	  --load \
+	  .
+
+.PHONY: nodemedic-docker-push
+nodemedic-docker-push:
+	docker push $(NODEMEDIC_IMG):$(NODEMEDIC_TAG)
+
+.PHONY: nodemedic-helm-lint
+nodemedic-helm-lint:
+	helm lint $(NODEMEDIC_HELM_DIR)
+	@echo "Verifying cluster-name guard accepts cf1z (Azure kubeadm)..."
+	helm template $(NODEMEDIC_HELM_DIR) --set clusterName=cf1z >/dev/null
+	@echo "Verifying cluster-name guard accepts test-* (AWS/EKS)..."
+	helm template $(NODEMEDIC_HELM_DIR) --set clusterName=test-odd-wire >/dev/null
+	@echo "Verifying cluster-name guard rejects production-shaped names..."
+	@! helm template $(NODEMEDIC_HELM_DIR) --set clusterName=stg-foo >/dev/null 2>&1 \
+	  && echo "OK: helm template refused stg-foo (Constitution Article I.9)" \
+	  || (echo "FAIL: helm template should reject clusterName=stg-foo per Constitution Article I.9" && exit 1)
+	@! helm template $(NODEMEDIC_HELM_DIR) --set clusterName=us-big-cone >/dev/null 2>&1 \
+	  && echo "OK: helm template refused us-big-cone (Constitution Article I.9)" \
+	  || (echo "FAIL: helm template should reject clusterName=us-big-cone per Constitution Article I.9" && exit 1)
+
+.PHONY: nodemedic-helm-package
+nodemedic-helm-package:
+	helm package $(NODEMEDIC_HELM_DIR) -d $(NODEMEDIC_HELM_DIR)/..
+
+.PHONY: nodemedic-clean
+nodemedic-clean:
+	rm -f $(NODEMEDIC_BIN)
+
+# ===========================================================================
+# NodeMedic AGENT (Scope 3 — AFA 2026 hackathon)
+# Spec: .specify/specs/002-nodemedic-agent/
+#
+# All targets are namespaced with `nodemedic-agent-` and operate only on:
+#   cmd/nodemedic-agent/, nodemedic_agent/, prompts/,
+#   deployment/helm/nodemedic-agent/, tests/nodemedic_agent/,
+#   Dockerfile.nodemedic-agent, pyproject.toml, uv.lock
+# NPD's existing targets and the controller's `nodemedic-*` targets are
+# unchanged.
+# ===========================================================================
+
+NODEMEDIC_AGENT_IMG ?= cf-registry.nr-ops.net/container-fabric/nodemedic-agent
+NODEMEDIC_AGENT_HELM_DIR ?= deployment/helm/nodemedic-agent
+NODEMEDIC_AGENT_TESTS_DIR ?= tests/nodemedic_agent
+
+# TAG defaults to dev-cf1z-<shortsha>; override with `make … TAG=…`.
+NODEMEDIC_AGENT_TAG ?= dev-cf1z-$(shell git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
+
+.PHONY: nodemedic-agent-help
+nodemedic-agent-help:
+	@echo "NodeMedic agent (Scope 3) make targets:"
+	@echo "  nodemedic-agent-test          uv run pytest tests/nodemedic_agent/"
+	@echo "  nodemedic-agent-lint          ruff/format if added; placeholder today"
+	@echo "  nodemedic-agent-runbook-lint  bash $(NODEMEDIC_AGENT_TESTS_DIR)/check_runbook.sh prompts/runbook.md"
+	@echo "  nodemedic-agent-helm-lint     helm lint $(NODEMEDIC_AGENT_HELM_DIR)"
+	@echo "  nodemedic-agent-docker-build  docker buildx build -f Dockerfile.nodemedic-agent (linux/amd64)"
+	@echo "  nodemedic-agent-docker-push   docker push $(NODEMEDIC_AGENT_IMG):$(NODEMEDIC_AGENT_TAG)"
+	@echo "  nodemedic-agent-clean         rm -rf .venv .pytest_cache __pycache__"
+
+.PHONY: nodemedic-agent-test
+nodemedic-agent-test:
+	uv run pytest $(NODEMEDIC_AGENT_TESTS_DIR)/ -v
+
+.PHONY: nodemedic-agent-lint
+nodemedic-agent-lint:
+	@echo "nodemedic-agent-lint: no linter wired in v1 (deferred to Phase 8 polish)"
+
+.PHONY: nodemedic-agent-runbook-lint
+nodemedic-agent-runbook-lint:
+	bash $(NODEMEDIC_AGENT_TESTS_DIR)/check_runbook.sh prompts/runbook.md
+
+.PHONY: nodemedic-agent-helm-lint
+nodemedic-agent-helm-lint:
+	helm lint $(NODEMEDIC_AGENT_HELM_DIR) --set clusterName=cf1z
+
+.PHONY: nodemedic-agent-docker-build
+nodemedic-agent-docker-build:
+	docker buildx build \
+	  -f Dockerfile.nodemedic-agent \
+	  --platform linux/amd64 \
+	  -t $(NODEMEDIC_AGENT_IMG):$(NODEMEDIC_AGENT_TAG) \
+	  --load \
+	  .
+
+.PHONY: nodemedic-agent-docker-push
+nodemedic-agent-docker-push:
+	docker push $(NODEMEDIC_AGENT_IMG):$(NODEMEDIC_AGENT_TAG)
+
+.PHONY: nodemedic-agent-clean
+nodemedic-agent-clean:
+	rm -rf .venv .pytest_cache .ruff_cache .mypy_cache
+	find nodemedic_agent tests/nodemedic_agent -type d -name __pycache__ -prune -exec rm -rf {} +
+
+# ===========================================================================
+# NodeMedic ON-CALL UI (Scope 4 — AFA 2026 hackathon)
+# Spec: .specify/specs/003-nodemedic-oncall-ui/
+#
+# All targets are namespaced with `nodemedic-oncall-ui-` and operate only on:
+#   cmd/nodemedic-oncall-ui/, internal/oncall/, internal/nodemedic/notifier/,
+#   deployment/helm/nodemedic-oncall-ui/, tests/oncall_ui/,
+#   Dockerfile.nodemedic-oncall-ui
+# NPD's existing targets, the controller's `nodemedic-*` targets, and the
+# agent's `nodemedic-agent-*` targets are unchanged.
+# ===========================================================================
+
+NODEMEDIC_ONCALL_UI_BIN ?= bin/nodemedic-oncall-ui
+NODEMEDIC_ONCALL_UI_IMG ?= cf-registry.nr-ops.net/container-fabric/nodemedic-oncall-ui
+NODEMEDIC_ONCALL_UI_HELM_DIR ?= deployment/helm/nodemedic-oncall-ui
+NODEMEDIC_ONCALL_UI_PKGS ?= ./cmd/nodemedic-oncall-ui/... ./internal/oncall/... ./internal/nodemedic/notifier/... ./tests/oncall_ui/...
+NODEMEDIC_ONCALL_UI_FMT_DIRS ?= cmd/nodemedic-oncall-ui internal/oncall tests/oncall_ui
+
+# TAG defaults to dev-cf1z-<shortsha>; override with `make … TAG=…`.
+NODEMEDIC_ONCALL_UI_TAG ?= dev-cf1z-$(shell git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
+
+.PHONY: nodemedic-oncall-ui-help
+nodemedic-oncall-ui-help:
+	@echo "NodeMedic on-call UI (Scope 4) make targets:"
+	@echo "  nodemedic-oncall-ui-test          go vet + gofmt -l + go test against UI packages"
+	@echo "  nodemedic-oncall-ui-helm-lint     helm lint $(NODEMEDIC_ONCALL_UI_HELM_DIR) --set clusterName=cf1z"
+	@echo "  nodemedic-oncall-ui-docker-build  docker buildx build -f Dockerfile.nodemedic-oncall-ui (linux/amd64)"
+	@echo "  nodemedic-oncall-ui-docker-push   docker push $(NODEMEDIC_ONCALL_UI_IMG):$(NODEMEDIC_ONCALL_UI_TAG)"
+	@echo "  nodemedic-oncall-ui-clean         rm $(NODEMEDIC_ONCALL_UI_BIN)"
+
+.PHONY: nodemedic-oncall-ui-test
+# T007: chains go vet + gofmt -l + go test so the Phase 1 smoke gate runs
+# from one entry point. The CI workflow's go-vet-fmt job invokes the same
+# two checks for parity.
+nodemedic-oncall-ui-test:
+	go vet ./cmd/nodemedic-oncall-ui/... ./internal/oncall/...
+	@unformatted="$$(gofmt -l $(NODEMEDIC_ONCALL_UI_FMT_DIRS))"; \
+	  if [ -n "$$unformatted" ]; then \
+	    echo "gofmt: unformatted files:" >&2; \
+	    echo "$$unformatted" >&2; \
+	    exit 1; \
+	  fi
+	go test -timeout=2m -count=1 $(NODEMEDIC_ONCALL_UI_PKGS)
+
+.PHONY: nodemedic-oncall-ui-helm-lint
+nodemedic-oncall-ui-helm-lint:
+	helm lint $(NODEMEDIC_ONCALL_UI_HELM_DIR) --set clusterName=cf1z
+
+.PHONY: nodemedic-oncall-ui-docker-build
+nodemedic-oncall-ui-docker-build:
+	docker buildx build \
+	  -f Dockerfile.nodemedic-oncall-ui \
+	  --platform linux/amd64 \
+	  -t $(NODEMEDIC_ONCALL_UI_IMG):$(NODEMEDIC_ONCALL_UI_TAG) \
+	  --load \
+	  .
+
+.PHONY: nodemedic-oncall-ui-docker-push
+nodemedic-oncall-ui-docker-push:
+	docker push $(NODEMEDIC_ONCALL_UI_IMG):$(NODEMEDIC_ONCALL_UI_TAG)
+
+.PHONY: nodemedic-oncall-ui-clean
+nodemedic-oncall-ui-clean:
+	rm -f $(NODEMEDIC_ONCALL_UI_BIN)

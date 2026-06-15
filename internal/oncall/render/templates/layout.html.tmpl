@@ -1,0 +1,23 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{block "title" .}}NodeMedic on-call{{end}}</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="page-header">
+    <a class="page-title" href="/">NodeMedic on-call</a>
+    <span class="page-meta">cf-monitoring · cf1z</span>
+  </header>
+  <main class="page-main">
+{{block "content" .}}{{end}}
+  </main>
+  <footer class="page-footer">
+    <span>NodeMedic on-call UI · demo-anonymous</span>
+  </footer>
+{{block "scripts" .}}{{end}}
+</body>
+</html>
+{{end}}

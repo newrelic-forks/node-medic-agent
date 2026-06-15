@@ -1,0 +1,32 @@
+{
+  "text": "Needs review on cf1z-general-nodes-2000007 in cf1z: HumanInLoop @ 0.42 — View full diagnosis: http://localhost:8080/cases/cf1z-general-nodes-2000007-1718374500",
+  "blocks": [
+    {
+      "type": "header",
+      "text": { "type": "plain_text", "text": "⚠️ Needs review: cf1z-general-nodes-2000007 (cf1z)" }
+    },
+    {
+      "type": "section",
+      "fields": [
+        { "type": "mrkdwn", "text": "*Decision:*\nHumanInLoop" },
+        { "type": "mrkdwn", "text": "*Confidence:*\n0.42" },
+        { "type": "mrkdwn", "text": "*Trigger:*\nKubeletUnhealthy" },
+        { "type": "mrkdwn", "text": "*rcaCategory:*\nKubelet" }
+      ]
+    },
+    {
+      "type": "actions",
+      "elements": [
+        {
+          "type": "button",
+          "style": "primary",
+          "text": { "type": "plain_text", "text": "View full diagnosis" },
+          "url": "http://localhost:8080/cases/cf1z-general-nodes-2000007-1718374500"
+        }
+      ]
+    }
+  ],
+  "attachments": [
+    { "color": "warning", "fallback": "Needs review on cf1z-general-nodes-2000007 in cf1z: HumanInLoop @ 0.42 — View full diagnosis: http://localhost:8080/cases/cf1z-general-nodes-2000007-1718374500" }
+  ]
+}

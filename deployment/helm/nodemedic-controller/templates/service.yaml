@@ -1,0 +1,19 @@
+{{- $_ := include "nodemedic.requireTestCluster" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nodemedic.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "nodemedic.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector: {{- include "nodemedic.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+    - name: probe
+      port: {{ .Values.service.probePort }}
+      targetPort: probe
+      protocol: TCP

@@ -1,0 +1,73 @@
+# Canned NHD CR for the gate-failure (HumanInLoop) demo path. Apply
+# this to a test cluster to drive the controller through the
+# **gate-fail / no-cordon / Slack `HumanInLoop`** arm without the
+# agent being live yet.
+#
+# Usage:
+#   kubectl --context=cf1z -n cf-monitoring apply \
+#     -f test/nodemedic/fixtures/nhd-humaninloop.yaml
+#
+# The diagnosis below deliberately fails BOTH non-action gate clauses
+# (confidence 0.50 < 0.70 minimum AND only 1 distinct evidence source
+# < 2 minimum) so the gate's Reason names every clause that failed.
+# The reconciler reads the diagnosis, runs ConfidenceGate, hits
+# GateFail, sets `decision=HumanInLoop`, posts a Slack
+# `BuildHumanInLoop` message, and transitions to Acted WITHOUT
+# touching Node.spec.unschedulable.
+apiVersion: nodemedic.cf.newrelic.com/v1alpha1
+kind: NodeHealthDiagnosisAI
+metadata:
+  name: ip-10-1-2-3-humaninloop-fixture
+  namespace: cf-monitoring
+spec:
+  case:
+    caseId: 1c2d3e4f-5678-4901-9234-5e6f7a8b9c0d
+    nodeName: ip-10-1-2-3.us-east-2.compute.internal
+    clusterName: cf1z
+    provider: aws
+    region: us-east-2
+    instanceId: i-0abc1234deadbeef
+    trigger:
+      type: ConntrackSaturated
+      reason: ConntrackHigh
+      message: "nf_conntrack_count climbing"
+      observedAt: "2026-06-12T15:00:00Z"
+  budgets:
+    maxTurns: 15
+    maxBudgetUSD: "0.50"
+    deadline: "2026-06-12T15:01:00Z"
+status:
+  phase: Diagnosed
+  conditions:
+    - type: AgentInvoked
+      status: "True"
+      reason: Posted
+      message: agent stub fixture
+      lastTransitionTime: "2026-06-12T15:00:05Z"
+    - type: ReportReady
+      status: "True"
+      reason: DiagnosisWritten
+      message: hand-canned low-confidence diagnosis for gate-fail demo
+      lastTransitionTime: "2026-06-12T15:00:35Z"
+  diagnosis:
+    rootCause: |
+      conntrack_count is rising but I don't have enough independent
+      signal to commit. NRQL shows growth, but the SSH probe timed out
+      and kubectl didn't surface anything kube-proxy logged about
+      packet drops. Recommend a human investigate before cordoning.
+    rcaCategory: Conntrack
+    confidence: 0.50
+    evidence:
+      - source: nrql
+        ref: "FROM SystemSample SELECT max(conntrack_count) WHERE hostname = 'ip-10-1-2-3' SINCE 1 hour ago TIMESERIES"
+        result: "moderate climb 180000 -> 220000 over 60min"
+        observedAt: "2026-06-12T15:00:20Z"
+    recommendation:
+      action: Cordon
+      reason: prevent further pod scheduling once a human concurs
+    auditLogRef:
+      objectStore: "s3://nodemedic-audit/dev/1c2d3e4f-5678-4901-9234-5e6f7a8b9c0d.jsonl"
+    modelUsed: claude-opus-4-7
+    turnsUsed: 4
+    costUSD: "0.09"
+    completedAt: "2026-06-12T15:00:35Z"

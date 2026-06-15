@@ -1,0 +1,53 @@
+# Representative Azure kubeadm Node fixture for unit + envtest harnesses.
+#
+# **REPLACE THIS WITH A REAL CAPTURE ON DAY 1 AM.** The shape below
+# matches what `kubectl get node <n> -o yaml` returns on a kubeadm
+# cluster running azure-cloud-controller-manager (June 2026 baseline),
+# based on documentation at:
+#   - https://github.com/kubernetes-sigs/cloud-provider-azure
+#     (providerID format: azure:///subscriptions/.../virtualMachines/<vm>)
+#   - argo-webhook injects cf.newrelic.com/cloud-provider per CF CLAUDE.md
+#
+# providerid.ParseAzure (US4) extracts the VM name as the last path
+# segment after `/virtualMachines/`. Region comes from
+# topology.kubernetes.io/region. Provider preference matches the EKS
+# fixture: explicit label first, then providerID URI scheme.
+apiVersion: v1
+kind: Node
+metadata:
+  name: cf1z-worker-vm-04
+  labels:
+    kubernetes.io/arch: amd64
+    kubernetes.io/os: linux
+    kubernetes.io/hostname: cf1z-worker-vm-04
+    topology.kubernetes.io/region: eastus2
+    topology.kubernetes.io/zone: eastus2-1
+    failure-domain.beta.kubernetes.io/region: eastus2
+    failure-domain.beta.kubernetes.io/zone: eastus2-1
+    node.kubernetes.io/instance-type: Standard_D4s_v5
+    cf.newrelic.com/cloud-provider: azure
+    cf.newrelic.com/cluster-name: cf1z
+spec:
+  providerID: azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/cf1z-rg/providers/Microsoft.Compute/virtualMachines/cf1z-worker-vm-04
+  taints: []
+status:
+  conditions:
+    - type: Ready
+      status: "True"
+      lastHeartbeatTime: "2026-06-12T15:00:00Z"
+      lastTransitionTime: "2026-06-12T14:00:00Z"
+      reason: KubeletReady
+      message: kubelet is posting ready status
+    - type: ConntrackSaturated
+      status: "False"
+      lastHeartbeatTime: "2026-06-12T15:00:00Z"
+      lastTransitionTime: "2026-06-12T14:00:00Z"
+      reason: ConntrackOK
+      message: nf_conntrack_count well below max
+  nodeInfo:
+    kubeletVersion: v1.31.7
+    osImage: Ubuntu 22.04.4 LTS
+    kernelVersion: 6.5.0-1018-azure
+    containerRuntimeVersion: containerd://1.7.19
+    architecture: amd64
+    operatingSystem: linux

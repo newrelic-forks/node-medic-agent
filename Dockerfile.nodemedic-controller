@@ -1,0 +1,61 @@
+# Dockerfile for the NodeMedic controller (Scope 2 of AFA 2026 hackathon).
+#
+# Builds the cmd/nodemedic-controller binary as a static, multi-arch image on
+# distroless. NPD's existing Dockerfile is unchanged. Build with:
+#
+#   docker buildx build \
+#     -f Dockerfile.nodemedic-controller \
+#     --platform linux/amd64,linux/arm64 \
+#     -t ghcr.io/cf/nodemedic-controller:dev \
+#     .
+#
+# Or via the Makefile: `make nodemedic-docker-build IMG=...`.
+#
+# Base images are pulled through `cf-registry.nr-ops.net`'s upstream mirrors
+# (docker.io for golang, registry.k8s.io for the runtime image) so cf1z and
+# other CF clusters don't depend on docker.io's anonymous-pull rate-limit
+# at deploy time. A production hardening pass should re-add @sha256
+# digest pins after capturing the mirror's specific digests.
+#
+# Override at build time with --build-context to test alternate toolchains:
+#   docker buildx build --build-context builder-base=docker-image://golang:<x>
+FROM --platform=$BUILDPLATFORM cf-registry.nr-ops.net/docker.io/library/golang:1.25 AS builder-base
+FROM --platform=$BUILDPLATFORM builder-base AS builder
+
+ARG TARGETARCH
+ARG TARGETOS=linux
+
+ENV GOPATH=/gopath/
+ENV PATH=$GOPATH/bin:$PATH
+ENV CGO_ENABLED=0
+# Allow on-demand toolchain download — go.mod's `go 1.26` directive may
+# exceed the base image's bundled Go (cf-registry's golang:1.25 ships
+# 1.25.11 today). The official base sets GOTOOLCHAIN=local; override.
+ENV GOTOOLCHAIN=auto
+RUN go version
+
+COPY . /src/
+WORKDIR /src
+
+# Build a fully-static binary; no libsystemd, no glibc dependency. The
+# `-trimpath` and `-buildvcs=false` flags keep the output reproducible and
+# avoid leaking workspace paths into the binary.
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -buildvcs=false \
+      -ldflags="-s -w" \
+      -o /out/nodemedic-controller \
+      ./cmd/nodemedic-controller
+
+# Alpine runtime — the controller binary is statically linked
+# (CGO_ENABLED=0) so musl-vs-glibc isn't an issue. ca-certificates are
+# required for outbound HTTPS to the Slack webhook.
+FROM cf-registry.nr-ops.net/docker.io/library/alpine:latest AS runtime
+
+RUN apk add --no-cache ca-certificates && \
+    addgroup -g 65532 nonroot && \
+    adduser -D -u 65532 -G nonroot nonroot
+
+COPY --from=builder /out/nodemedic-controller /usr/local/bin/nodemedic-controller
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/nodemedic-controller"]

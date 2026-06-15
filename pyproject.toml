@@ -1,0 +1,55 @@
+[project]
+name = "nodemedic-agent"
+version = "0.1.0"
+description = "NodeMedic agent (Scope 3) — receives POST /diagnose, runs a Claude Agent SDK loop per case, writes the diagnosis to NodeHealthDiagnosisAI status."
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Container Fabric" }]
+
+dependencies = [
+    "claude-agent-sdk>=0.2.0,<0.3.0",
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.32,<1.0",
+    "kubernetes>=31.0.0,<32.0.0",
+    "pydantic>=2.9,<3.0",
+    "pydantic-settings>=2.6,<3.0",
+    "httpx>=0.27,<1.0",
+    "structlog>=24.4,<25.0",
+]
+
+[project.optional-dependencies]
+metrics = [
+    "prometheus-client>=0.21,<1.0",
+    "prometheus-fastapi-instrumentator>=7.0,<8.0",
+]
+
+[project.scripts]
+nodemedic-agent = "nodemedic_agent.app:run"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["nodemedic_agent*"]
+exclude = ["tests*"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=9.0.3,<10.0",
+    "pytest-asyncio>=1.0,<2.0",
+    "respx>=0.21,<1.0",
+    "freezegun>=1.5,<2.0",
+    "jsonschema>=4.23,<5.0",
+    "pyyaml>=6.0,<7.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/nodemedic_agent"]
+asyncio_mode = "auto"
+filterwarnings = [
+    # Surface unexpected warnings as failures, but ignore noisy upstream ones.
+    "error",
+    "ignore::DeprecationWarning:kubernetes.*",
+    "ignore::DeprecationWarning:pkg_resources.*",
+]

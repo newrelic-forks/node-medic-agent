@@ -1,0 +1,322 @@
+openapi: 3.0.3
+info:
+  title: NodeMedic On-Call UI API
+  version: 0.1.0-dev
+  description: |
+    HTTP surface for the NodeMedic On-Call UI. Six routes total: two HTML pages, one JSON list endpoint, three action endpoints (one of which is a Server-Sent Events stream for drain progress). All routes are served by a single Go binary listening on `:8080` (FR-19). No authentication — the UI runs behind `kubectl port-forward` per spec §0 Q4.
+
+    This is **not** a cross-scope contract. Per Constitution Article II.1 the system has exactly two cross-scope contracts: the NHD CRD and `POST /diagnose`. The endpoints below are internal to the UI binary and consumed by browsers (HTML pages) and the UI's own JS code (action endpoints). No other NodeMedic component calls these endpoints.
+
+    ## Source of truth
+    Path parameters use `<nhd-name>` to match the spec's prose; OpenAPI parameter names are normalized to `nhdName`. Response bodies are documented inline; the audit annotation's payload schema lives in `ui-action-history.schema.json`.
+
+servers:
+  - url: http://localhost:8080
+    description: Demo path (kubectl port-forward → ClusterIP Service)
+
+paths:
+  /:
+    get:
+      summary: List view — last 24h of NHDs
+      description: |
+        Server-rendered HTML page. Lists NHDs from `metadata.namespace = config.namespace` (default `cf-monitoring`) with `creationTimestamp >= now - 24h`, sorted newest first. Auto-refreshes every 30 s by client-side `fetch()` against `/api/cases` (FR-6).
+      operationId: getListPage
+      responses:
+        '200':
+          description: HTML page rendered.
+          content:
+            text/html:
+              schema:
+                type: string
+                description: Rendered list-view HTML. Browser-targeted; no machine consumers.
+        '500':
+          $ref: '#/components/responses/ApiserverUnavailable'
+
+  /api/cases:
+    get:
+      summary: List view — JSON shape (auto-refresh source)
+      description: |
+        JSON shape of the list view. Same data the SSR page renders; consumed by the list-view JS to refresh the table tbody every 30 s. (FR-6.)
+      operationId: getListJSON
+      responses:
+        '200':
+          description: List of cases as JSON array.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ListPageRow'
+        '500':
+          $ref: '#/components/responses/ApiserverUnavailableJSON'
+
+  /cases/{nhdName}:
+    get:
+      summary: Per-case detail page
+      description: |
+        Server-rendered HTML page for one NHD. Shows case metadata, agent diagnosis, evidence list (collapsible bodies), action history (merged controller + UI), and the three action buttons. Button enablement is gated by live Node state, NOT NHD phase (FR-9a). If the NHD doesn't exist, the page renders a 200 with a "Case not found" panel (FR-12 — explicit non-404 to keep semantics: the *page* exists, the *entity* inside doesn't).
+      operationId: getDetailPage
+      parameters:
+        - $ref: '#/components/parameters/NHDName'
+      responses:
+        '200':
+          description: HTML page rendered. May render "Case not found" or "Apiserver unreachable" inline panels (FR-12, FR-13).
+          content:
+            text/html:
+              schema:
+                type: string
+                description: Rendered per-case detail HTML.
+
+  /api/cases/{nhdName}/actions/uncordon:
+    post:
+      summary: Uncordon the node referenced by the NHD
+      description: |
+        Patches `node.spec.unschedulable = false` on the node identified by `nhd.spec.case.nodeName`. Idempotent — already-uncordoned nodes return `{result: "already uncordoned (no change)"}` and DO NOT write an audit entry (FR-14). NotFound on the node returns 200 with `{result: "node no longer exists (already reclaimed)"}` (FR-17a). Otherwise on success appends an entry to the NHD's `nodemedic.cf.newrelic.com/ui-action-history` annotation.
+      operationId: postUncordon
+      parameters:
+        - $ref: '#/components/parameters/NHDName'
+      responses:
+        '200':
+          description: Action completed (success, idempotent no-change, or reclaimed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResult'
+        '400':
+          description: |
+            Defensive belt — the UI never produces this. Returned if the NHD's `spec.case.nodeName` doesn't match the node the action would target (FR-17). The UI itself only ever calls action endpoints with the path NHD's own node, but a hand-crafted request that mismatches is rejected here.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: NHD does not exist or is in a different namespace.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ApiserverUnavailableJSON'
+
+  /api/cases/{nhdName}/actions/clear-skip-deletion:
+    post:
+      summary: Remove the MLC skipDeletion annotation from the node
+      description: |
+        Removes `machine-lifecycle.newrelic.com/skipDeletion` from `node.metadata.annotations`. Idempotent — already-cleared annotation returns `{result: "already cleared (no change)"}` and DO NOT write an audit entry (FR-15). NotFound on the node behaves as in uncordon (FR-17a).
+      operationId: postClearSkipDeletion
+      parameters:
+        - $ref: '#/components/parameters/NHDName'
+      responses:
+        '200':
+          description: Action completed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResult'
+        '400':
+          description: Same defensive belt as uncordon (FR-17).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: NHD does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ApiserverUnavailableJSON'
+
+  /api/cases/{nhdName}/actions/drain:
+    post:
+      summary: Drain the node — Server-Sent Events stream of per-pod results
+      description: |
+        Lists pods on `nhd.spec.case.nodeName` (excluding DaemonSet pods, mirror pods, and pods with `priority=system-node-critical`), evicts each via the `pods/eviction` subresource, and streams per-pod outcomes as SSE events. PDB violations surface per-pod (`result=error`, `detail` names the PDB) and DO NOT abort the stream (FR-16). On completion, writes a single audit entry summarizing the drain to the NHD annotation.
+
+        Concurrency: up to 3 evictions in flight at once (research R-3). Per-pod events stream in arrival order, not pod-list order. The terminal `event: complete` always fires, even if zero pods were eligible.
+
+        If a drain is already in flight on the same node (process-local state), responds `409 Conflict` immediately with the current progress so the UI can show a "drain in progress" indicator (FR-9 G9).
+
+        Browser consumer: this endpoint is POST + SSE. The native `EventSource` API is GET-only by spec, so the browser uses `fetch(url, {method: "POST"})` and reads `response.body.getReader()`, parsing SSE frames in JS. See research R-7 for the parser shape. Server-side wire format (Content-Type, frame layout) is identical to what an `EventSource` consumer would see; only the client API differs.
+      operationId: postDrain
+      parameters:
+        - $ref: '#/components/parameters/NHDName'
+      responses:
+        '200':
+          description: Server-Sent Events stream of per-pod evictions.
+          headers:
+            Content-Type:
+              schema: { type: string, example: text/event-stream }
+            Cache-Control:
+              schema: { type: string, example: no-cache }
+            X-Accel-Buffering:
+              schema: { type: string, example: 'no' }
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/DrainSSEStream'
+        '400':
+          description: Defensive belt (FR-17) or pre-flight pod-list failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: NHD does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Drain already in flight on this node — client should consume the existing stream (or wait for it to complete).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ErrorResponse'
+                  - type: object
+                    properties:
+                      progress:
+                        $ref: '#/components/schemas/DrainProgressView'
+        '500':
+          $ref: '#/components/responses/ApiserverUnavailableJSON'
+
+components:
+  parameters:
+    NHDName:
+      name: nhdName
+      in: path
+      required: true
+      description: |
+        `metadata.name` of the NHD CR. Format: `<nodeNameTruncated50>-<unixTsSeconds>` per Spec 001 data-model.md §1.5.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 253
+        example: cf1z-general-nodes-1000007-1718374200
+
+  schemas:
+    ListPageRow:
+      type: object
+      additionalProperties: false
+      required: [nhdName, nodeName, clusterName, createdAt, triggerType, phase, rowClass]
+      properties:
+        nhdName:        { type: string }
+        nodeName:       { type: string }
+        clusterName:    { type: string }
+        createdAt:      { type: string, format: date-time }
+        triggerType:    { type: string }
+        triggerReason:  { type: string }
+        phase:
+          type: string
+          enum: [Pending, Diagnosing, Diagnosed, Acted, Failed]
+        decision:
+          type: string
+          enum: ['', Applied, HumanInLoop, Skipped]
+          description: Empty string when controller has not yet decided (phase ∈ {Pending, Diagnosing, Diagnosed}).
+        confidence:
+          type: number
+          format: double
+          minimum: -1
+          maximum: 1
+          description: -1 indicates "diagnosis not yet written" (so the UI can render "—" instead of "0.00").
+        rowClass:
+          type: string
+          enum: [row-applied, row-human-in-loop, row-failed, row-neutral]
+          description: Drives FR-8 row highlighting in the SSR table.
+
+    ActionResult:
+      type: object
+      additionalProperties: false
+      required: [result]
+      properties:
+        result:
+          type: string
+          description: |
+            Human-readable outcome string. Values returned by each action endpoint:
+              - `ok`
+              - `already uncordoned (no change)` (FR-14 idempotent)
+              - `already cleared (no change)` (FR-15 idempotent)
+              - `node no longer exists (already reclaimed)` (FR-17a, all three endpoints)
+              - For drain: terminal SSE `event: complete` payload — see `DrainSSEStream`.
+        detail:
+          type: string
+          description: Optional, may carry per-action context (e.g. drain partial summary).
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Machine-readable error class (e.g. `node-mismatch`, `apiserver-unavailable`).
+        message:
+          type: string
+          description: Human-readable explanation.
+
+    DrainProgressView:
+      type: object
+      additionalProperties: false
+      properties:
+        startedAt:    { type: string, format: date-time }
+        totalPods:    { type: integer, minimum: 0 }
+        evictedPods:  { type: integer, minimum: 0 }
+        skippedPods:  { type: integer, minimum: 0 }
+        erroredPods:  { type: integer, minimum: 0 }
+
+    DrainSSEStream:
+      description: |
+        SSE event stream. Each event is a `data:` line carrying JSON, terminated by a blank line. Two event types:
+          - Default (no `event:` line) — per-pod result. Payload: `DrainPodEvent`.
+          - `event: complete` — terminal summary. Payload: `DrainCompleteEvent`. Emitted exactly once at end of stream, even if zero pods were eligible.
+
+        Wire example:
+
+            data: {"pod":"foo-abc123","namespace":"default","result":"evicted","detail":""}\n\n
+            data: {"pod":"bar-def456","namespace":"kube-system","result":"skipped","detail":"DaemonSet"}\n\n
+            data: {"pod":"baz-ghi789","namespace":"default","result":"error","detail":"would violate PDB foo-pdb"}\n\n
+            event: complete
+            data: {"evicted":12,"skipped":3,"errored":1,"durationMs":4523}\n\n
+      type: string
+
+    DrainPodEvent:
+      type: object
+      additionalProperties: false
+      required: [pod, namespace, result]
+      properties:
+        pod:        { type: string }
+        namespace:  { type: string }
+        result:
+          type: string
+          enum: [evicted, skipped, error]
+        detail:
+          type: string
+          description: Optional. For `skipped`, names the filter reason (`DaemonSet`, `mirror`, `system-node-critical`, `terminating`). For `error`, names the apiserver error (e.g. `would violate PDB foo-pdb`).
+
+    DrainCompleteEvent:
+      type: object
+      additionalProperties: false
+      required: [evicted, skipped, errored, durationMs]
+      properties:
+        evicted:     { type: integer, minimum: 0 }
+        skipped:     { type: integer, minimum: 0 }
+        errored:     { type: integer, minimum: 0 }
+        durationMs:  { type: integer, minimum: 0, description: Total wall-clock duration of the drain loop, ms. }
+
+  responses:
+    ApiserverUnavailable:
+      description: Apiserver is unreachable. Page renders an inline error banner with a Retry link (FR-13).
+      content:
+        text/html:
+          schema:
+            type: string
+            description: Rendered error banner HTML.
+
+    ApiserverUnavailableJSON:
+      description: Apiserver is unreachable.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

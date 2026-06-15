@@ -1,0 +1,37 @@
+# cf1z (Azure kubeadm) install overrides.
+#
+# Constitution Article II.7: same image, two clouds. The chart is
+# provider-agnostic; this values file picks Azure-only credential refs and
+# leaves AWS knobs alone.
+
+cloud:
+  provider: "azure"
+  awsRoleArn: ""   # Azure install — no IRSA
+
+config:
+  # nerd-completion gateway is shared between AWS and Azure installs.
+  anthropicBaseUrl: "https://nerd-completion.staging-service.nr-ops.net"
+  claudeModel: "claude-opus-4-7"
+  claudeFallbackModel: "claude-sonnet-4-6"
+  nrAccountId: 1
+  # NR HTTP MCP URL — kept for the readyz probe and for compatibility
+  # with the chart shape, but not actually used as an HTTP MCP server.
+  # The agent ships a local in-process MCP server hosting
+  # mcp__nodemedic__execute_nrql_query that calls staging-api.newrelic.com's
+  # NerdGraph directly with `Api-Key: <NRAK>` (mirrors nova's
+  # k8s-agent-claude-sdk pattern). The public mcp.newrelic.com endpoint
+  # rejects staging-scoped NRAKs anyway (verified 2026-06-14: 401
+  # "authentication required").
+  nrMcpUrl: "https://staging-api.newrelic.com/graphql"
+  kubeNamespace: "cf-monitoring"
+  stubAgent: false
+
+# Standard resource shape — empirical revision lands in T082 after the
+# T063 sizing measurement on cf1z.
+resources:
+  requests:
+    cpu: 1
+    memory: 1Gi
+  limits:
+    cpu: 4
+    memory: 3Gi

@@ -1,0 +1,141 @@
+{{define "title"}}NodeMedic on-call · {{if .NotFound}}case not found{{else}}{{.Page.NodeName}}{{end}}{{end}}
+
+{{define "content"}}
+{{if .ErrorBanner}}
+<div class="error-banner" role="alert">
+  <strong>apiserver unreachable:</strong> {{.ErrorBanner}}
+  <a href="" class="retry-link">Retry</a>
+</div>
+{{end}}
+
+{{if .NotFound}}
+<section class="not-found">
+  <h1>Case not found</h1>
+  <p>The NHD <code>{{.Page.NHDName}}</code> doesn't exist in <code>{{.Page.Namespace}}</code>, or has been garbage-collected.</p>
+  <p><a href="/">← Back to list</a></p>
+</section>
+{{else}}
+{{with .Page}}
+<section class="case-header">
+  <p class="back-link"><a href="/">← Back to list</a></p>
+  <h1>{{.NodeName}} <span class="cluster">({{.ClusterName}})</span></h1>
+  <dl class="case-meta">
+    <dt>NHD</dt><dd><code>{{.NHDName}}</code></dd>
+    <dt>Case ID</dt><dd><code>{{.CaseID}}</code></dd>
+    <dt>Provider</dt><dd>{{.Provider}}</dd>
+    <dt>Region</dt><dd>{{.Region}}</dd>
+    <dt>Instance</dt><dd><code>{{.InstanceID}}</code></dd>
+    <dt>Phase</dt><dd>{{.Phase}}</dd>
+  </dl>
+
+  {{if eq .PhaseBannerKind "in-progress"}}
+  <div class="phase-banner phase-banner-in-progress" role="status">
+    <strong>Diagnosis in progress.</strong> The agent is still running; data below may be partial.
+  </div>
+  {{else if eq .PhaseBannerKind "failed"}}
+  <div class="phase-banner phase-banner-failed" role="status">
+    <strong>Diagnosis failed.</strong> The agent did not produce a complete diagnosis for this case.
+  </div>
+  {{end}}
+
+  {{if not .NodeExists}}
+  <div class="phase-banner reclaimed-banner" role="status">
+    <strong>Node was reclaimed by MLC.</strong> The Kubernetes Node CR no longer exists; all action buttons are disabled.
+  </div>
+  {{end}}
+</section>
+
+<section class="trigger">
+  <h2>Trigger</h2>
+  <dl class="trigger-meta">
+    <dt>Type</dt><dd>{{.Trigger.Type}}</dd>
+    {{if .Trigger.Reason}}<dt>Reason</dt><dd>{{.Trigger.Reason}}</dd>{{end}}
+    {{if .Trigger.Message}}<dt>Message</dt><dd>{{.Trigger.Message}}</dd>{{end}}
+    <dt>Observed</dt><dd><time title="{{formatTime .Trigger.ObservedAt}}">{{formatRelative .Trigger.ObservedAt}}</time></dd>
+  </dl>
+</section>
+
+{{if .HasDiagnosis}}
+<section class="diagnosis">
+  <h2>Agent diagnosis</h2>
+  <p class="root-cause">{{.Diagnosis.RootCause}}</p>
+  <dl class="diagnosis-meta">
+    {{if .Diagnosis.RCACategory}}<dt>RCA category</dt><dd>{{.Diagnosis.RCACategory}}</dd>{{end}}
+    <dt>Confidence</dt><dd>{{formatConfidence .Diagnosis.Confidence}}</dd>
+    {{if .Diagnosis.ModelUsed}}<dt>Model</dt><dd><code>{{.Diagnosis.ModelUsed}}</code></dd>{{end}}
+    {{if not .Diagnosis.CompletedAt.IsZero}}<dt>Completed</dt><dd><time>{{formatTime .Diagnosis.CompletedAt}}</time></dd>{{end}}
+  </dl>
+
+  {{if .Diagnosis.Recommendation.Action}}
+  <div class="recommendation">
+    <h3>Recommendation</h3>
+    <p><strong>{{.Diagnosis.Recommendation.Action}}.</strong> {{.Diagnosis.Recommendation.Reason}}</p>
+  </div>
+  {{end}}
+
+  {{if .Diagnosis.Evidence}}
+  <div class="evidence">
+    <h3>Evidence</h3>
+    <ul class="evidence-list">
+      {{range .Diagnosis.Evidence}}
+      <li class="evidence-entry">
+        <details {{if not .Collapsible}}open{{end}}>
+          <summary>
+            <span class="evidence-source">{{.Source}}</span>
+            <code class="evidence-ref">{{truncRef .Ref}}</code>
+            {{if not .ObservedAt.IsZero}}<time class="evidence-ts">{{formatRelative .ObservedAt}}</time>{{end}}
+          </summary>
+          <pre class="evidence-result">{{.Result}}</pre>
+        </details>
+      </li>
+      {{end}}
+    </ul>
+  </div>
+  {{end}}
+</section>
+{{end}}
+
+{{template "_action_history" .ActionHistory}}
+
+<section class="actions">
+  <h2>Actions</h2>
+  <p class="actions-help">Each action is auditable; the result is appended to the NHD's <code>ui-action-history</code> annotation.</p>
+  <div class="actions-row">
+    <button type="button"
+            class="action-btn action-uncordon"
+            data-action="uncordon"
+            data-nhd="{{.NHDName}}"
+            data-node="{{.NodeName}}"
+            {{if not .UncordonEnabled}}disabled title="{{.UncordonDisabledReason}}"{{end}}>
+      Uncordon Node
+    </button>
+    <button type="button"
+            class="action-btn action-clear-skip"
+            data-action="clear-skip-deletion"
+            data-nhd="{{.NHDName}}"
+            data-node="{{.NodeName}}"
+            {{if not .ClearSkipDeletionEnabled}}disabled title="{{.ClearSkipDeletionDisabledReason}}"{{end}}>
+      Clear MLC skipDeletion
+    </button>
+    <button type="button"
+            class="action-btn action-drain"
+            data-action="drain"
+            data-nhd="{{.NHDName}}"
+            data-node="{{.NodeName}}"
+            {{if not .DrainEnabled}}disabled title="{{.DrainDisabledReason}}"{{end}}>
+      Drain Node
+    </button>
+  </div>
+  <div id="action-result" class="action-result" role="status" aria-live="polite"></div>
+</section>
+
+{{end}}
+{{end}}
+{{end}}
+
+{{define "scripts"}}
+<script src="/static/modals.js" defer></script>
+<script src="/static/detail.js" defer></script>
+{{end}}
+
+{{template "layout" .}}

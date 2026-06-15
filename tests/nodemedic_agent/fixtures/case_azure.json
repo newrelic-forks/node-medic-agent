@@ -1,0 +1,19 @@
+{
+  "caseId": "1a2b3c4d-5e6f-4789-9abc-def012345678",
+  "nodeName": "cf1z-general-nodes-2000002",
+  "clusterName": "cf1z",
+  "provider": "azure",
+  "region": "eastus2",
+  "instanceId": "cf1z-general-nodes-2000002",
+  "trigger": {
+    "type": "ContainerRuntimeUnhealthy",
+    "reason": "ContainerdUnreachable",
+    "message": "containerd socket /run/containerd/containerd.sock unreachable",
+    "observedAt": "2026-06-13T14:00:00Z"
+  },
+  "budgets": {
+    "maxTurns": 15,
+    "maxBudgetUSD": "0.50",
+    "deadlineSec": 60
+  }
+}

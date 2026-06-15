@@ -1,0 +1,80 @@
+name: nodemedic-agent-ci
+
+# Path-filtered to agent paths only — keeps NPD's existing CI and the
+# controller's `nodemedic-ci.yml` out of the way.
+# Image build/push is intentionally NOT in CI for the hackathon — pushing to
+# cf-registry needs developer creds (Colima → cf-registry, verified
+# empirically against the controller image push 2026-06-14).
+
+on:
+  pull_request:
+    paths:
+      - 'cmd/nodemedic-agent/**'
+      - 'nodemedic_agent/**'
+      - 'prompts/**'
+      - 'deployment/helm/nodemedic-agent/**'
+      - 'tests/nodemedic_agent/**'
+      - 'Dockerfile.nodemedic-agent'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/nodemedic-agent-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: nodemedic-agent-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@4959332f0f014c5280e7eac8b70c90cb574c9f9b # v6.6.0
+        with:
+          version: "0.7.3"
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev --frozen
+
+      - name: Run pytest
+        run: uv run pytest tests/nodemedic_agent/ -v
+
+  helm-lint:
+    name: nodemedic-agent-helm-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.14.4
+
+      - name: Lint agent chart
+        # If templates/ is empty (Phase 1) helm lint is still happy; once
+        # Phase 2 lands the cluster-name guard, the --set is the gate.
+        run: |
+          if [ -z "$(ls -A deployment/helm/nodemedic-agent/templates 2>/dev/null | grep -v '^\.gitkeep$')" ]; then
+            echo "::notice::nodemedic-agent chart templates not yet authored — skipping (Phase 2 lands them)"
+            exit 0
+          fi
+          helm lint deployment/helm/nodemedic-agent --set clusterName=cf1z
+
+  runbook-lint:
+    name: nodemedic-agent-runbook-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Run runbook lint
+        run: bash tests/nodemedic_agent/check_runbook.sh prompts/runbook.md

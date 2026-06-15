@@ -1,0 +1,63 @@
+# T036 fixture — NHD with a full 20-entry ui-action-history annotation.
+# Used by audit ringbuffer tests (T054) to verify FIFO eviction at the
+# boundary: appending the 21st entry drops index 0.
+#
+# All 20 entries are uncordon entries with sequential timestamps so a
+# `cmp.Diff` after one append can verify the precise eviction shape.
+apiVersion: nodemedic.cf.newrelic.com/v1alpha1
+kind: NodeHealthDiagnosisAI
+metadata:
+  name: cf1z-general-nodes-1000010-1718373800
+  namespace: cf-monitoring
+  creationTimestamp: "2026-06-14T15:23:20Z"
+  uid: 55555555-5555-4555-8555-555555555555
+  annotations:
+    nodemedic.cf.newrelic.com/ui-action-history: |
+      [
+        {"ts":"2026-06-14T15:24:00Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:01Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:02Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:03Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:04Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:05Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:06Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:07Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:08Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:09Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:10Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:11Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:12Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:13Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:14Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:15Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:16Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:17Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:18Z","action":"uncordon","actor":"demo-anonymous","result":"ok"},
+        {"ts":"2026-06-14T15:24:19Z","action":"uncordon","actor":"demo-anonymous","result":"ok"}
+      ]
+spec:
+  case:
+    caseId: eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee
+    nodeName: cf1z-general-nodes-1000010
+    clusterName: cf1z
+    provider: azure
+    region: eastus2
+    instanceId: cf1z-general-nodes-1000010-vm
+    trigger:
+      type: KubeletUnhealthy
+      reason: KubeletNotReady
+      message: "kubelet not ready"
+      observedAt: "2026-06-14T15:23:00Z"
+  budgets:
+    maxTurns: 15
+    maxBudgetUSD: "0.50"
+status:
+  phase: Acted
+  diagnosis:
+    rootCause: "kubelet unhealthy"
+    rcaCategory: Kubelet
+    confidence: 0.85
+  action:
+    decision: Applied
+    operation: cordon
+    appliedAt: "2026-06-14T15:23:30Z"

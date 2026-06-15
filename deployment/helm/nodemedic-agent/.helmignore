@@ -1,0 +1,21 @@
+# Patterns to ignore when packaging the chart.
+# Default helmignore plus repo-specific noise.
+.DS_Store
+.git/
+.gitignore
+.idea/
+.vscode/
+*.tmproj
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+# CI / docs
+.github/
+docs/
+.specify/
+# Editor artifacts
+*.iml
+# Test fixtures and ad-hoc scripts inside the chart dir (none today)
+.helmignore

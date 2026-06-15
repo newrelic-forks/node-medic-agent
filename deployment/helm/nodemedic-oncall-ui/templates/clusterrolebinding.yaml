@@ -1,0 +1,14 @@
+{{- $_ := include "nodemedic-oncall-ui.requireTestCluster" . -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "nodemedic-oncall-ui.fullname" . }}
+  labels: {{- include "nodemedic-oncall-ui.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "nodemedic-oncall-ui.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nodemedic-oncall-ui.fullname" . }}
+    namespace: {{ .Release.Namespace }}

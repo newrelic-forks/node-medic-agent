@@ -1,0 +1,31 @@
+# RBAC for the NodeMedic controller.
+#
+# Verbs are STRICTLY limited per spec NFR-4 and Constitution Articles I.1
+# (read-only by default) and I.2 (cordon-only mutation):
+#
+#   nhd      -> get/list/watch + create/update/patch    (status as subresource)
+#   nodes    -> get/list/watch/patch                    (only spec.unschedulable in code)
+#   events   -> create/patch                            (controller emits Events)
+#
+# No other resources, no other verbs. This file is the single source of truth
+# — controller-gen does NOT regenerate it because the controller code
+# deliberately omits +kubebuilder:rbac markers (they're easy to widen by
+# accident; hand-written RBAC is the safer hackathon-grade pattern).
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nodemedic-controller
+rules:
+  - apiGroups: ["nodemedic.cf.newrelic.com"]
+    resources: ["nodehealthdiagnosisais"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["nodemedic.cf.newrelic.com"]
+    resources: ["nodehealthdiagnosisais/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]

@@ -1,0 +1,51 @@
+{{define "title"}}NodeMedic on-call · last 24h{{end}}
+
+{{define "content"}}
+{{if .ErrorBanner}}
+<div class="error-banner" role="alert">
+  <strong>apiserver unreachable:</strong> {{.ErrorBanner}}
+  <a href="/" class="retry-link">Retry</a>
+</div>
+{{end}}
+
+<section class="list-section">
+  <h1>Recent diagnoses (last 24h)</h1>
+  <p class="list-meta">Auto-refreshes every 30 s. Generated at <time>{{formatTime .GeneratedAt}}</time>.</p>
+  <table class="list-table">
+    <thead>
+      <tr>
+        <th>Created</th>
+        <th>Node</th>
+        <th>Cluster</th>
+        <th>Trigger</th>
+        <th>Phase</th>
+        <th>Decision</th>
+        <th>Confidence</th>
+        <th>View</th>
+      </tr>
+    </thead>
+    <tbody id="list-tbody">
+      {{range .Rows}}
+      <tr class="{{.RowClass}}" data-nhd="{{.NHDName}}">
+        <td><time title="{{formatTime .CreatedAt}}">{{formatRelative .CreatedAt}}</time></td>
+        <td>{{.NodeName}}</td>
+        <td>{{.ClusterName}}</td>
+        <td>{{.TriggerType}}{{if .TriggerReason}} <span class="trigger-reason">({{.TriggerReason}})</span>{{end}}</td>
+        <td>{{.Phase}}</td>
+        <td>{{if .Decision}}{{.Decision}}{{else}}—{{end}}</td>
+        <td>{{formatConfidence .Confidence}}</td>
+        <td><a class="view-link" href="/cases/{{.NHDName}}">View</a></td>
+      </tr>
+      {{else}}
+      <tr><td colspan="8" class="empty">No NHDs in the last 24 h.</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+
+{{define "scripts"}}
+<script src="/static/list.js" defer></script>
+{{end}}
+
+{{template "layout" .}}

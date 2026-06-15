@@ -1,0 +1,19 @@
+# Placeholder for a future test-* AWS/EKS install of the on-call UI.
+#
+# The UI is cloud-agnostic — it never calls AWS or Azure SDKs, only the
+# in-cluster apiserver — so per-cloud values diverge only on
+# `clusterName` and `image.tag`. This file exists today as a
+# documented stub so a captain reaching for an EKS install knows the
+# convention; no actual deployment uses it on Day 1.
+#
+# Apply with (when ready):
+#   helm --kube-context=test-<name> upgrade --install nodemedic-oncall-ui \
+#     ./deployment/helm/nodemedic-oncall-ui \
+#     -n cf-monitoring \
+#     -f deployment/helm/nodemedic-oncall-ui/values-eks.yaml \
+#     --set clusterName=test-<name> \
+#     --set image.tag=dev-cf1z-<sha>
+
+image:
+  repository: cf-registry.nr-ops.net/container-fabric/nodemedic-oncall-ui
+  tag: ""

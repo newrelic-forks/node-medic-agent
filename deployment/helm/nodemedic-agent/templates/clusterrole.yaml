@@ -1,0 +1,26 @@
+{{- $_ := include "nodemedic-agent.requireTestCluster" . -}}
+# FR-14 minimal verbs.
+# Constitution Article I.2: NO `nodes/patch`. The agent never cordons —
+# that's the controller's job. CI grep test (T077) fails the build if
+# `nodes/patch` ever appears in this chart.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "nodemedic-agent.fullname" . }}
+  labels: {{- include "nodemedic-agent.labels" . | nindent 4 }}
+rules:
+  # NHD CRs the agent reads spec.* from and writes status.diagnosis to.
+  - apiGroups: ["nodemedic.cf.newrelic.com"]
+    resources: ["nodehealthdiagnosisais"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["nodemedic.cf.newrelic.com"]
+    resources: ["nodehealthdiagnosisais/status"]
+    verbs: ["get", "update", "patch"]
+  # Read-only on Nodes — Constitution Article I.2 forbids `patch` here.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # Read-only on Pods + Events for evidence gathering.
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list", "watch"]

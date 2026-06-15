@@ -1,0 +1,58 @@
+# Spec-only NHD fixture for the cf1z happy-path smoke test.
+#
+# This file deliberately contains NO status block. Why: kubectl
+# `apply --server-side --subresource=status --force-conflicts` claims
+# field ownership over status.phase via Server-Side Apply, then
+# reasserts the original value (Diagnosed) on every subsequent apply
+# — which fights the controller's own phase=Acted update. To keep
+# the controller's transitions sticky, the smoke test uses a plain
+# merge-patch for the status, applied via the sibling fixture
+# nhd-applied-cf1z-status-patch.yaml.
+#
+# Two-step demo flow:
+#
+#   # 1. Create the NHD with empty status. The controller's stub
+#   #    agent (--stub-agent flag enabled in values-azure.yaml) will
+#   #    move phase to Diagnosing.
+#   kubectl --context=cf1z -n cf-monitoring apply \
+#     -f test/nodemedic/fixtures/nhd-applied-cf1z.yaml
+#
+#   # 2. Patch the status subresource with phase=Diagnosed + a canned
+#   #    diagnosis. `--type=merge` is a JSON merge-patch, NOT
+#   #    Server-Side Apply, so kubectl does not claim ownership of
+#   #    f:phase — the controller's phase=Acted write survives.
+#   kubectl --context=cf1z -n cf-monitoring patch \
+#     nhd cf1z-general-nodes-2000001-applied-fixture \
+#     --subresource=status --type=merge \
+#     --patch-file test/nodemedic/fixtures/nhd-applied-cf1z-status-patch.yaml
+#
+# Cleanup after demo:
+#   kubectl --context=cf1z uncordon cf1z-general-nodes-2000001
+#   kubectl --context=cf1z -n cf-monitoring delete \
+#     nhd cf1z-general-nodes-2000001-applied-fixture
+#
+# WARNING: applying this fixture eventually cordons the target node.
+# No new pods will land there until you uncordon. Existing pods keep
+# running.
+apiVersion: nodemedic.cf.newrelic.com/v1alpha1
+kind: NodeHealthDiagnosisAI
+metadata:
+  name: cf1z-general-nodes-2000001-applied-fixture
+  namespace: cf-monitoring
+spec:
+  case:
+    caseId: cccccccc-dddd-4eee-afff-000000000001
+    nodeName: cf1z-general-nodes-2000001
+    clusterName: cf1z
+    provider: azure
+    region: eastus
+    instanceId: "1"
+    trigger:
+      type: ConntrackSaturated
+      reason: ConntrackHigh
+      message: "nf_conntrack_count=262100 max=262144"
+      observedAt: "2026-06-13T02:00:00Z"
+  budgets:
+    maxTurns: 15
+    maxBudgetUSD: "0.50"
+    deadline: "2099-12-31T23:59:59Z"

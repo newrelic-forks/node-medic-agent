@@ -1,0 +1,63 @@
+{{- $_ := include "nodemedic-agent.requireTestCluster" . -}}
+{{- if .Values.runbookLintJob.enabled -}}
+# AC-15 install-time gate (research R-7).
+#
+# Runs the rendered image's /app/tests/check_runbook.sh against the runbook
+# baked at /app/prompts/runbook.md. If any of the seven AC-15 clauses is
+# missing, the Job fails non-zero and `helm install` aborts before the
+# Deployment ever rolls out.
+#
+# Hook policy: pre-install + pre-upgrade so a runbook regression at upgrade
+# time also blocks. `before-hook-creation,hook-succeeded` deletes the prior
+# Job pod so re-running install/upgrade doesn't conflict on Job uniqueness.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "nodemedic-agent.fullname" . }}-runbook-lint
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nodemedic-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runbook-lint
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        {{- include "nodemedic-agent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: runbook-lint
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: runbook-lint
+          image: {{ include "nodemedic-agent.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - "bash /app/tests/check_runbook.sh /app/prompts/runbook.md"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+{{- end }}

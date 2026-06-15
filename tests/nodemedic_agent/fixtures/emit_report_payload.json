@@ -1,0 +1,29 @@
+{
+  "rootCause": "Containerd socket /run/containerd/containerd.sock is unreachable inside the hack-node-problem-detector pod's mount view, while the host socket is intact. NPD's check-containerd.sh probe correctly reports ContainerRuntimeUnhealthy. The cause is a shadow bind-mount over the in-pod socket path; node-level container runtime is healthy. Recommend cordon to prevent new pod scheduling until the shadow is cleared.",
+  "rcaCategory": "Kernel",
+  "confidence": 0.85,
+  "evidence": [
+    {
+      "source": "kubectl",
+      "ref": "kubectl --context=cf1z get node cf1z-general-nodes-2000002 -o yaml",
+      "result": "{conditions: [..., {type: ContainerRuntimeUnhealthy, status: True, reason: ContainerdUnreachable, lastTransitionTime: 2026-06-13T14:00:23Z}], ...}",
+      "observedAt": "2026-06-13T14:00:30Z"
+    },
+    {
+      "source": "ssh",
+      "ref": "ssh -i $SSH_KEY_PATH ubuntu@10.0.0.42 'ls -la /run/containerd/containerd.sock; pgrep -fa containerd'",
+      "result": "srw-rw---- 1 root root 0 Jun 13 13:55 /run/containerd/containerd.sock\n11234 /usr/bin/containerd\n",
+      "observedAt": "2026-06-13T14:00:35Z"
+    },
+    {
+      "source": "nrql",
+      "ref": "SELECT * FROM K8sNodeSample WHERE clusterName='cf1z' AND nodeName='cf1z-general-nodes-2000002' SINCE 15 minutes ago",
+      "result": "{cpuUsedCores: 0.42, memoryUsedBytes: 8.1e9, ...}",
+      "observedAt": "2026-06-13T14:00:40Z"
+    }
+  ],
+  "recommendation": {
+    "action": "Cordon",
+    "reason": "Containerd unreachable inside NPD pod view; new pods would also fail to schedule onto this node. Cordon until shadow mount cleared."
+  }
+}

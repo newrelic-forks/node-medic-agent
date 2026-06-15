@@ -1,0 +1,29 @@
+# T036 fixture — phase=Diagnosing, no diagnosis yet.
+# The agent loop is mid-flight; FR-9a says the per-case page MUST show
+# a "Diagnosis in progress" banner but buttons stay enabled per node
+# state. AC-14a is the gate.
+apiVersion: nodemedic.cf.newrelic.com/v1alpha1
+kind: NodeHealthDiagnosisAI
+metadata:
+  name: cf1z-general-nodes-1000009-1718374000
+  namespace: cf-monitoring
+  creationTimestamp: "2026-06-14T15:26:40Z"
+  uid: 33333333-3333-4333-8333-333333333333
+spec:
+  case:
+    caseId: cccccccc-cccc-4ccc-8ccc-cccccccccccc
+    nodeName: cf1z-general-nodes-1000009
+    clusterName: cf1z
+    provider: azure
+    region: eastus2
+    instanceId: cf1z-general-nodes-1000009-vm
+    trigger:
+      type: KubeletUnhealthy
+      reason: KubeletNotReady
+      message: "kubelet not ready"
+      observedAt: "2026-06-14T15:26:30Z"
+  budgets:
+    maxTurns: 15
+    maxBudgetUSD: "0.50"
+status:
+  phase: Diagnosing

@@ -1,0 +1,25 @@
+# Azure overrides for the NodeMedic on-call UI chart.
+#
+# `cf1z` is the legacy Container Fabric Azure kubeadm test cluster
+# (sister to jc1z / sk1z). Per Constitution Article I.5 it's the only
+# Azure-side name accepted by the chart's cluster-name guard alongside
+# `test-*` AWS/EKS clusters.
+#
+# Apply with:
+#   helm --kube-context=cf1z upgrade --install nodemedic-oncall-ui \
+#     ./deployment/helm/nodemedic-oncall-ui \
+#     -n cf-monitoring \
+#     -f deployment/helm/nodemedic-oncall-ui/values-azure.yaml \
+#     --set clusterName=cf1z \
+#     --set image.tag=dev-cf1z-<sha>
+#
+# `clusterName` is deliberately not defaulted — set it explicitly per
+# install so an accidental file-only override can't bypass the per-
+# cluster guard.
+
+image:
+  # Hackathon dev image, same registry path as the controller and agent.
+  # Tag follows the merge commit on hackathon-2026/cf1z-baseline.
+  # Built from cf1z-baseline on Apple Silicon via Colima.
+  repository: cf-registry.nr-ops.net/container-fabric/nodemedic-oncall-ui
+  tag: ""   # set explicitly at install time via --set image.tag=dev-cf1z-<sha>

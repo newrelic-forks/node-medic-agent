@@ -1,0 +1,174 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-medic-agent
+  namespace: cf-monitoring
+  labels:
+    app.kubernetes.io/name: node-medic-agent
+    app.kubernetes.io/managed-by: hackathon-2026
+    app.kubernetes.io/component: detector
+    app.kubernetes.io/version: v0.8.24-baseline
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node-medic-agent
+      app.kubernetes.io/component: detector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: node-medic-agent
+        app.kubernetes.io/managed-by: hackathon-2026
+        app.kubernetes.io/component: detector
+        app.kubernetes.io/version: v0.8.24-baseline
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "20267"
+    spec:
+      serviceAccountName: node-medic-agent
+      # hostNetwork: kubelet's healthz binds to 127.0.0.1:10248 by default;
+      # we need to share the host's loopback to reach it.
+      # hostPID: our containerd probe walks the host process table to verify
+      # the containerd process is alive (no pid file on Ubuntu+systemd).
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/os
+                    operator: In
+                    values: [linux]
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      priorityClassName: system-node-critical
+      containers:
+        - name: node-problem-detector
+          # Same image as the helm-managed NPD: shares cached layers, no extra pull.
+          image: cf-registry.nr-ops.net/registry.k8s.io/node-problem-detector/node-problem-detector:v0.8.24
+          imagePullPolicy: IfNotPresent
+          command:
+            - /node-problem-detector
+            - --logtostderr
+            - --v=2
+            # System log monitors. NOT loading kernel-monitor.json here —
+            # the helm NPD already loads it and owns Kernel/Xfs/Cper conditions.
+            - --config.system-log-monitor=/config/readonly-monitor.json,/config/systemd-monitor.json
+            # Host-level Prometheus metrics. Our copy drops disk/bytes_used
+            # and disk/percent_used to avoid statfs() noise on host mount
+            # points the container can't see (e.g. /boot/efi).
+            - --config.system-stats-monitor=/etc/cf1z/configs/system-stats-monitor.json
+            # Our cf1z-aware health probes (replace upstream's broken
+            # crictl/systemctl-dependent ones).
+            - --config.custom-plugin-monitor=/etc/cf1z/configs/check-kubelet.json,/etc/cf1z/configs/check-containerd.json
+            # Ports shifted off upstream's 20256/20257 because hostNetwork=true
+            # exposes them on the host; the helm NPD's pod-network 20257 is
+            # unrelated, but we leave clear separation.
+            - --address=0.0.0.0
+            - --port=20266
+            - --prometheus-address=0.0.0.0
+            - --prometheus-port=20267
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            requests:
+              cpu: 50m
+              memory: 200Mi
+            limits:
+              cpu: 200m
+              memory: 400Mi
+          securityContext:
+            privileged: true
+          ports:
+            - name: http
+              containerPort: 20266
+              hostPort: 20266
+              protocol: TCP
+            - name: prom
+              containerPort: 20267
+              hostPort: 20267
+              protocol: TCP
+          volumeMounts:
+            # /var/log: journald source for systemd-monitor
+            - name: log
+              mountPath: /var/log
+              readOnly: true
+            # /dev/kmsg: kmsg source for readonly-monitor
+            - name: kmsg
+              mountPath: /dev/kmsg
+              readOnly: true
+            - name: localtime
+              mountPath: /etc/localtime
+              readOnly: true
+            - name: machine-id
+              mountPath: /etc/machine-id
+              readOnly: true
+            # Host containerd runtime dir (socket lives here): containerd probe
+            - name: host-run-containerd
+              mountPath: /host/run/containerd
+              readOnly: true
+            # Host /proc: containerd probe walks for process named "containerd"
+            # (hostPID=true alone is not enough; we still need /proc visible)
+            - name: host-proc
+              mountPath: /host/proc
+              readOnly: true
+            # NPD JSON configs (mode 0644)
+            - name: medic-configs
+              mountPath: /etc/cf1z/configs
+              readOnly: true
+            # Probe scripts (mode 0755 — see volume spec)
+            - name: medic-probes
+              mountPath: /etc/cf1z/probes
+              readOnly: true
+      volumes:
+        - name: log
+          hostPath:
+            path: /var/log
+        - name: kmsg
+          hostPath:
+            path: /dev/kmsg
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+        - name: machine-id
+          hostPath:
+            path: /etc/machine-id
+            type: File
+        - name: host-run-containerd
+          hostPath:
+            path: /var/run/containerd
+            type: Directory
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: Directory
+        # Two volume mounts off the same ConfigMap to set different modes.
+        - name: medic-configs
+          configMap:
+            name: node-medic-agent-cf1z
+            defaultMode: 0644
+            items:
+              - key: check-kubelet.json
+                path: check-kubelet.json
+              - key: check-containerd.json
+                path: check-containerd.json
+              - key: system-stats-monitor.json
+                path: system-stats-monitor.json
+        - name: medic-probes
+          configMap:
+            name: node-medic-agent-cf1z
+            defaultMode: 0755
+            items:
+              - key: check-kubelet-healthz.sh
+                path: check-kubelet-healthz.sh
+                mode: 0755
+              - key: check-containerd.sh
+                path: check-containerd.sh
+                mode: 0755

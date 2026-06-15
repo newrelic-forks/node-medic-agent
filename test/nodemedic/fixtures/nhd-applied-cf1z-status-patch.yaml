@@ -1,0 +1,52 @@
+# Status-merge-patch companion to nhd-applied-cf1z.yaml.
+#
+# Apply with:
+#   kubectl --context=cf1z -n cf-monitoring patch \
+#     nhd cf1z-general-nodes-2000001-applied-fixture \
+#     --subresource=status --type=merge \
+#     --patch-file test/nodemedic/fixtures/nhd-applied-cf1z-status-patch.yaml
+#
+# This is a JSON merge-patch (kubectl normalizes YAML → JSON before
+# sending). Targets the status subresource only. Unlike
+# `apply --server-side`, it does NOT claim field ownership for
+# `f:phase` — so the controller's subsequent `phase=Acted` write
+# survives instead of being reverted on the next kubectl apply.
+status:
+  phase: Diagnosed
+  conditions:
+    - type: AgentInvoked
+      status: "True"
+      reason: Posted
+      message: agent stub fixture
+      lastTransitionTime: "2026-06-13T02:00:05Z"
+    - type: ReportReady
+      status: "True"
+      reason: DiagnosisWritten
+      message: hand-canned diagnosis for the cf1z happy-path demo
+      lastTransitionTime: "2026-06-13T02:00:35Z"
+  diagnosis:
+    rootCause: |
+      conntrack table saturated. Three independent sources concur on
+      growth + current usage near the cap; recommend cordon.
+    rcaCategory: Conntrack
+    confidence: 0.85
+    evidence:
+      - source: nrql
+        ref: "FROM SystemSample SELECT max(conntrack_count) WHERE hostname = 'cf1z-general-nodes-2000001' SINCE 1 hour ago TIMESERIES"
+        result: "growth from 180000 to 262100 over 60min"
+        observedAt: "2026-06-13T02:00:20Z"
+      - source: ssh
+        ref: "sysctl net.netfilter.nf_conntrack_count"
+        result: "262100/262144"
+        observedAt: "2026-06-13T02:00:25Z"
+      - source: kubectl
+        ref: "kubectl logs kube-proxy"
+        result: "table full"
+        observedAt: "2026-06-13T02:00:30Z"
+    recommendation:
+      action: Cordon
+      reason: prevent further pod scheduling
+    modelUsed: claude-opus-4-7
+    turnsUsed: 7
+    costUSD: "0.18"
+    completedAt: "2026-06-13T02:00:35Z"

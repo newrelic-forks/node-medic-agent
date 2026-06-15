@@ -1,0 +1,200 @@
+# node-medic-agent configs and probes.
+#
+# Two logical groups in one ConfigMap (with per-item modes so probes get +x):
+#   1. Custom-plugin-monitor JSON configs that wire up our probes to NPD's
+#      condition-emission machinery.
+#   2. Bash probe scripts invoked by those configs. We ship the scripts here
+#      rather than building a custom NPD image so iteration is fast.
+#
+# Replaces the original `*-overrides` ConfigMap that wrapped the upstream
+# health-checker (which depended on crictl/systemctl, neither in the image).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-medic-agent-cf1z
+  namespace: cf-monitoring
+  labels:
+    app.kubernetes.io/name: node-medic-agent
+    app.kubernetes.io/managed-by: hackathon-2026
+data:
+  # ---- system-stats-monitor config (mode 0644) ----
+  #
+  # Same as the image-bundled /config/system-stats-monitor.json minus the two
+  # disk-usage metrics that depend on statfs() against host mount points the
+  # container can't see (e.g. /boot/efi). With disk/bytes_used and
+  # disk/percent_used removed, disk_collector.go:305 short-circuits and skips
+  # the entire partition loop, eliminating the `Failed to retrieve disk usage`
+  # log spam. Disk I/O metrics (queue length, io_time, ops counters) are
+  # unaffected — they come from /proc/diskstats. Disk-fill is already
+  # covered by NR infra agents in cf-monitoring, so no real loss.
+  system-stats-monitor.json: |
+    {
+      "cpu": {
+        "metricsConfigs": {
+          "cpu/load_15m": {"displayName": "cpu/load_15m"},
+          "cpu/load_1m": {"displayName": "cpu/load_1m"},
+          "cpu/load_5m": {"displayName": "cpu/load_5m"},
+          "cpu/runnable_task_count": {"displayName": "cpu/runnable_task_count"},
+          "cpu/usage_time": {"displayName": "cpu/usage_time"},
+          "system/cpu_stat": {"displayName": "system/cpu_stat"},
+          "system/interrupts_total": {"displayName": "system/interrupts_total"},
+          "system/processes_total": {"displayName": "system/processes_total"},
+          "system/procs_blocked": {"displayName": "system/procs_blocked"},
+          "system/procs_running": {"displayName": "system/procs_running"}
+        }
+      },
+      "disk": {
+        "includeAllAttachedBlk": true,
+        "includeRootBlk": true,
+        "lsblkTimeout": "5s",
+        "metricsConfigs": {
+          "disk/avg_queue_len": {"displayName": "disk/avg_queue_len"},
+          "disk/io_time": {"displayName": "disk/io_time"},
+          "disk/merged_operation_count": {"displayName": "disk/merged_operation_count"},
+          "disk/operation_bytes_count": {"displayName": "disk/operation_bytes_count"},
+          "disk/operation_count": {"displayName": "disk/operation_count"},
+          "disk/operation_time": {"displayName": "disk/operation_time"},
+          "disk/weighted_io": {"displayName": "disk/weighted_io"}
+        }
+      },
+      "host": {
+        "metricsConfigs": {
+          "host/uptime": {"displayName": "host/uptime"}
+        }
+      },
+      "invokeInterval": "60s",
+      "memory": {
+        "metricsConfigs": {
+          "memory/anonymous_used": {"displayName": "memory/anonymous_used"},
+          "memory/bytes_used": {"displayName": "memory/bytes_used"},
+          "memory/dirty_used": {"displayName": "memory/dirty_used"},
+          "memory/page_cache_used": {"displayName": "memory/page_cache_used"},
+          "memory/unevictable_used": {"displayName": "memory/unevictable_used"},
+          "memory/percent_used": {"displayName": "memory/percent_used"}
+        }
+      },
+      "osFeature": {
+        "KnownModulesConfigPath": "/config/guestosconfig/known-modules.json",
+        "metricsConfigs": {
+          "system/os_feature": {"displayName": "system/os_feature"}
+        }
+      }
+    }
+
+  # ---- custom-plugin-monitor configs (mode 0644 via defaultMode) ----
+
+  check-kubelet.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "30s",
+        "timeout": "5s",
+        "max_output_length": 200,
+        "concurrency": 1
+      },
+      "source": "node-medic-agent-kubelet",
+      "metricsReporting": true,
+      "conditions": [
+        {
+          "type": "KubeletUnhealthy",
+          "reason": "KubeletIsHealthy",
+          "message": "kubelet healthz endpoint is reachable"
+        }
+      ],
+      "rules": [
+        {
+          "type": "permanent",
+          "condition": "KubeletUnhealthy",
+          "reason": "KubeletHealthzFailed",
+          "path": "/etc/cf1z/probes/check-kubelet-healthz.sh",
+          "timeout": "5s"
+        }
+      ]
+    }
+
+  check-containerd.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "30s",
+        "timeout": "5s",
+        "max_output_length": 200,
+        "concurrency": 1
+      },
+      "source": "node-medic-agent-containerd",
+      "metricsReporting": true,
+      "conditions": [
+        {
+          "type": "ContainerRuntimeUnhealthy",
+          "reason": "ContainerRuntimeIsHealthy",
+          "message": "containerd socket present and process alive"
+        }
+      ],
+      "rules": [
+        {
+          "type": "permanent",
+          "condition": "ContainerRuntimeUnhealthy",
+          "reason": "ContainerdUnreachable",
+          "path": "/etc/cf1z/probes/check-containerd.sh",
+          "timeout": "5s"
+        }
+      ]
+    }
+
+  # ---- probe scripts (need execute bit; set per-item below in DaemonSet volume) ----
+
+  check-kubelet-healthz.sh: |
+    #!/usr/bin/env bash
+    # See deployment/cf1z/probes/check-kubelet-healthz.sh in the repo for
+    # the canonical source. Keep these in sync.
+    set -uo pipefail
+    HOST=${KUBELET_HEALTHZ_HOST:-127.0.0.1}
+    PORT=${KUBELET_HEALTHZ_PORT:-10248}
+    URI=${KUBELET_HEALTHZ_PATH:-/healthz}
+    TIMEOUT_SECS=${KUBELET_HEALTHZ_TIMEOUT:-3}
+    if ! exec 3<>/dev/tcp/${HOST}/${PORT} 2>/dev/null; then
+      echo "ERROR connect kubelet ${HOST}:${PORT}: refused or unreachable"
+      exit 1
+    fi
+    printf 'GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n' "$URI" "$HOST" >&3
+    if ! read -r -t "$TIMEOUT_SECS" STATUS <&3; then
+      exec 3>&- 2>/dev/null
+      echo "ERROR kubelet ${HOST}:${PORT}${URI}: read timeout (${TIMEOUT_SECS}s)"
+      exit 1
+    fi
+    exec 3>&- 2>/dev/null
+    if [[ "$STATUS" == HTTP/*\ 200* ]]; then
+      echo "kubelet healthz OK"
+      exit 0
+    fi
+    STATUS=${STATUS%$'\r'}
+    echo "ERROR kubelet ${HOST}:${PORT}${URI}: ${STATUS:-<no response>}"
+    exit 1
+
+  check-containerd.sh: |
+    #!/usr/bin/env bash
+    # See deployment/cf1z/probes/check-containerd.sh in the repo for the
+    # canonical source. Keep these in sync.
+    set -uo pipefail
+    SOCK=${CONTAINERD_SOCK:-/host/run/containerd/containerd.sock}
+    PROC=${CONTAINERD_PROC:-/host/proc}
+    COMM_NAME=${CONTAINERD_COMM:-containerd}
+    if [ ! -S "$SOCK" ]; then
+      echo "ERROR containerd socket missing or not a socket: $SOCK"
+      exit 1
+    fi
+    PID_FOUND=
+    for d in "$PROC"/[0-9]*; do
+      [ -r "$d/comm" ] || continue
+      read -r comm <"$d/comm" 2>/dev/null || continue
+      if [ "$comm" = "$COMM_NAME" ]; then
+        PID_FOUND=${d##*/}
+        break
+      fi
+    done
+    if [ -z "$PID_FOUND" ]; then
+      echo "ERROR no process named '$COMM_NAME' in host PID namespace"
+      exit 1
+    fi
+    echo "containerd OK (pid $PID_FOUND, sock $SOCK)"
+    exit 0

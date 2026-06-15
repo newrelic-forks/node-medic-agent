@@ -1,0 +1,27 @@
+# EKS overrides for the NodeMedic controller chart.
+#
+# Apply with:
+#   helm --kube-context=test-odd-wire upgrade --install nodemedic-controller \
+#     ./deployment/helm/nodemedic-controller \
+#     -n cf-monitoring \
+#     -f deployment/helm/nodemedic-controller/values-eks.yaml
+#
+# The cluster name MUST be passed at install time (intentionally kept
+# out of this file so a single override can't bypass the per-cluster
+# cf1z / test-* guard). Example:
+#   --set clusterName=test-odd-wire
+#
+# See .specify/specs/001-nodemedic-controller/quickstart.md and
+# Constitution Article I.9.
+
+config:
+  # Defaults are fine for the demo path on EKS test clusters; override
+  # only if your in-cluster agent service is somewhere else.
+  agentURL: "http://nodemedic-agent.cf-monitoring.svc:8080/diagnose"
+
+# Pin the demo image tag so EKS pulls the same digest the captains
+# rehearsed on. Override on the command line for ad-hoc dev images:
+#   --set image.tag=dev-<sha>
+image:
+  repository: ghcr.io/cf/nodemedic-controller
+  tag: "0.1.0"
