@@ -91,11 +91,16 @@ func newTestServer(t *testing.T, c client.Client) *httptest.Server {
 	return ts
 }
 
-// attachActionHandlers is a Phase 5/6 hook. Phase 4's tests don't
-// touch action routes; the action handlers stay as stubs returning
-// 501 until Phase 5 ships its package. This indirection lets later
-// phases plug in their handlers without churn here.
-var attachActionHandlers = func(*server.Server, client.Client) {}
+// attachActionHandlers wires the Phase 5 (US3) + Phase 6 (US4)
+// action endpoints. Phase 5 ships uncordon + clear-skip-deletion;
+// Phase 6 swaps in the real Drain handler.
+func attachActionHandlers(srv *server.Server, c client.Client) {
+	actDeps := handlers.ActionDeps{Client: c, Namespace: srv.Cfg().Namespace, Logger: srv.Logger(), AuditBufferSize: srv.Cfg().AuditBufferSize}
+	srv.SetRouteHandler("POST /api/cases/{nhd}/actions/uncordon", handlers.Uncordon(actDeps))
+	srv.SetRouteHandler("POST /api/cases/{nhd}/actions/clear-skip-deletion", handlers.ClearSkipDeletion(actDeps))
+	drainDeps := handlers.DrainDeps{Client: c, Namespace: srv.Cfg().Namespace, Logger: srv.Logger(), DrainConcurrency: srv.Cfg().DrainConcurrency, AuditBufferSize: srv.Cfg().AuditBufferSize}
+	srv.SetRouteHandler("POST /api/cases/{nhd}/actions/drain", handlers.Drain(drainDeps))
+}
 
 // staticHandler builds the same /static/ handler main.go does.
 func staticHandler() http.Handler {

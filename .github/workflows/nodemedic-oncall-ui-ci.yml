@@ -106,44 +106,60 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.14.4
+
       - name: RBAC invariants (UI / controller / agent)
-        # The three negated greps land in T072 (Phase 5) — they verify
-        # that:
-        #   - the UI's ClusterRole MUST NOT carry forbidden verbs
+        # T072 (Phase 5) ships the build-time half of Articles I.1 +
+        # I.2. The strategy is to `helm template` each chart so the
+        # check runs against rendered YAML rather than raw template
+        # source — this avoids false positives on documentation
+        # comments inside the templates that legitimately list the
+        # forbidden verbs.
+        #
+        # Three invariants:
+        #   - UI ClusterRole MUST NOT carry forbidden verbs
         #     (Article I.1: nodes/delete, nodes/create, secrets,
         #     configmaps, /finalizers, *)
-        #   - the controller's ClusterRole MUST NOT acquire
-        #     pods/eviction (Article I.2 — drain stays UI-only)
-        #   - the agent's ClusterRole MUST NOT acquire nodes/patch
+        #   - controller ClusterRole MUST NOT acquire pods/eviction
+        #     (Article I.2 — drain stays UI-only, deliberately
+        #     scope-expanded for the UI per spec §0 Q5)
+        #   - agent ClusterRole MUST NOT acquire nodes/patch
         #     (Article I.2 — cordon stays controller-only)
-        # Until the UI's clusterrole.yaml exists, the UI half is a
-        # no-op; the controller and agent halves run unconditionally.
         run: |
           set -euo pipefail
-          ui_chart=deployment/helm/nodemedic-oncall-ui/templates/clusterrole.yaml
-          controller_chart=deployment/helm/nodemedic-controller/templates/clusterrole.yaml
-          agent_chart=deployment/helm/nodemedic-agent/templates/clusterrole.yaml
+          ui_chart=deployment/helm/nodemedic-oncall-ui
+          controller_chart=deployment/helm/nodemedic-controller
+          agent_chart=deployment/helm/nodemedic-agent
 
-          if [ -f "$ui_chart" ]; then
-            if grep -E 'nodes/(delete|create)|secrets|configmaps|/finalizers|\*' "$ui_chart"; then
-              echo "::error::UI ClusterRole carries a forbidden verb (Article I.1)"
-              exit 1
+          fail() { echo "::error::$1"; exit 1; }
+
+          if [ -f "$ui_chart/templates/clusterrole.yaml" ]; then
+            ui_rendered=$(helm template "$ui_chart" --set clusterName=cf1z 2>/dev/null | awk '/^kind: ClusterRole$/,/^---$/')
+            if echo "$ui_rendered" | grep -E '"(delete|create)"' | grep -qE 'nodes' \
+               || echo "$ui_rendered" | grep -qE '"secrets"|"configmaps"|/finalizers|\*' ; then
+              echo "$ui_rendered"
+              fail "UI ClusterRole carries a forbidden verb (Article I.1)"
             fi
           else
-            echo "::notice::UI ClusterRole template not yet authored — skipping UI half (T019 lands it)"
+            echo "::notice::UI ClusterRole template not yet authored — skipping UI half"
           fi
 
-          if [ -f "$controller_chart" ]; then
-            if grep 'pods/eviction' "$controller_chart"; then
-              echo "::error::Controller ClusterRole acquired pods/eviction (Article I.2)"
-              exit 1
+          if [ -f "$controller_chart/templates/clusterrole.yaml" ]; then
+            controller_rendered=$(helm template "$controller_chart" --set clusterName=cf1z 2>/dev/null | awk '/^kind: ClusterRole$/,/^---$/')
+            if echo "$controller_rendered" | grep -q 'pods/eviction'; then
+              echo "$controller_rendered"
+              fail "Controller ClusterRole acquired pods/eviction (Article I.2)"
             fi
           fi
 
-          if [ -f "$agent_chart" ]; then
-            if grep 'nodes/patch' "$agent_chart"; then
-              echo "::error::Agent ClusterRole acquired nodes/patch (Article I.2)"
-              exit 1
+          if [ -f "$agent_chart/templates/clusterrole.yaml" ]; then
+            agent_rendered=$(helm template "$agent_chart" --set clusterName=cf1z 2>/dev/null | awk '/^kind: ClusterRole$/,/^---$/')
+            if echo "$agent_rendered" | grep -E '"patch"' | grep -q 'nodes'; then
+              echo "$agent_rendered"
+              fail "Agent ClusterRole acquired nodes/patch (Article I.2)"
             fi
           fi
 
